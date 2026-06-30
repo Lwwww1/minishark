@@ -8,7 +8,7 @@
  * 所有结构体均使用 __attribute__((packed))，确保与网络字节序严格对齐，
  * 可直接对 libpcap 抓取的原始包数据进行强制转换访问。
  *
- * 命名约定：使用小写缩写（如 eth_hdr, tcp_hdr），避免与系统 <netinet/*.h>
+ * 命名约定：使用小写缩写（如 eth_hdr, tcp_hdr），避免与系统 netinet/ *.h
  * 中的 iphdr / tcphdr / udphdr 等类型发生冲突。
  */
 
