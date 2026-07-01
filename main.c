@@ -1,10 +1,12 @@
 #include "common.h"
+#include "capture.h"
 
 volatile int g_running = 1;
 
 static void signal_handler(int sig) {
     (void)sig;
     g_running = 0;
+    capture_break();
 }
 
 static void print_usage(const char *prog) {
@@ -40,9 +42,23 @@ int main(int argc, char *argv[]) {
 
     LOG_INFO("minishark starting...");
 
-    /* TODO Day 2: 初始化抓包引擎 */
-    /* TODO Day 3: 集成 BPF 过滤 */
-    /* TODO Day 5: PCAP 文件读写模式切换 */
+    /* Day 2: 初始化抓包引擎 */
+    pcap_t *handle = capture_init(iface, filter_expr);
+    if (handle == NULL) {
+        LOG_ERROR("failed to initialize capture engine");
+        return 1;
+    }
+
+    /* Day 5 (预留): 如果指定了 -r 则读取 pcap 文件，否则实时抓包 */
+    /* Day 5 (预留): 如果指定了 -w 则开启 pcap 文件写入 */
+    (void)read_file;
+    (void)write_file;
+
+    /* 启动抓包循环（阻塞直到 Ctrl+C） */
+    capture_start(handle);
+
+    /* 清理 */
+    capture_stop(handle);
 
     LOG_INFO("minishark stopped.");
 
