@@ -169,4 +169,18 @@ struct icmp_hdr {
     /* 之后是 ICMP payload，如 Echo 携带的数据 */
 } __attribute__((packed));
 
+/* ============================================================
+ *                 协议解析函数声明
+ *  所有 parser 接受从当前层起始的字节流和长度，
+ *  解析失败（截断、字段越界）时返回 -1，成功返回 0。
+ *  parse_icmp 的 is_ipv6 标志用于选择 ICMPv4 与 ICMPv6 的类型常量。
+ * ============================================================ */
+
+int parse_eth (const uint8_t *pkt, size_t len);
+int parse_ipv4(const uint8_t *pkt, size_t len);
+int parse_ipv6(const uint8_t *pkt, size_t len);
+int parse_tcp (const uint8_t *pkt, size_t len);
+int parse_udp (const uint8_t *pkt, size_t len);
+int parse_icmp(const uint8_t *pkt, size_t len, int is_ipv6);
+
 #endif /* PROTOCOL_H */
