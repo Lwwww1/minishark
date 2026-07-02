@@ -414,6 +414,15 @@ int parse_tcp(const uint8_t *pkt, size_t len)
            seq, ack, flags,
            window, checksum, urgent, hdr_len);
 
+    /* Day 4: TCP 端口 80/8080 → HTTP 解析 */
+    if ((src_port == HTTP_PORT || dst_port == HTTP_PORT ||
+         src_port == HTTP_PORT_ALT || dst_port == HTTP_PORT_ALT)
+        && len > hdr_len) {
+        const uint8_t *app = pkt + hdr_len;
+        size_t app_len = len - hdr_len;
+        parse_http(app, app_len);
+    }
+
     return 0;
 }
 
@@ -447,6 +456,13 @@ int parse_udp(const uint8_t *pkt, size_t len)
     printf("UDP : %u -> %u | len=%u cksum=0x%04x\n",
            src_port, dst_port,
            length, checksum);
+
+    /* Day 4: UDP 端口 53 → DNS 解析 */
+    if ((src_port == DNS_PORT || dst_port == DNS_PORT) && len > UDP_HDR_LEN) {
+        const uint8_t *app = pkt + UDP_HDR_LEN;
+        size_t app_len = len - UDP_HDR_LEN;
+        parse_dns(app, app_len);
+    }
 
     return 0;
 }
@@ -483,6 +499,434 @@ int parse_icmp(const uint8_t *pkt, size_t len, int is_ipv6)
            h->type, tname ? tname : "Unknown",
            h->code, ntohs(h->checksum),
            id, seq);
+
+    return 0;
+}
+
+/* ============================================================
+ *              DNS 域名解压辅助函数
+ * ============================================================ */
+
+/*
+ * 解压 DNS 报文中以标签格式编码的域名（支持压缩指针）。
+ *
+ * DNS 域名由一系列 "标签" (label) 组成：
+ *   - 普通标签: 首字节高 2 位为 00，低 6 位为标签长度(1-63)，后跟标签数据
+ *   - 压缩指针: 首字节高 2 位为 11 (0xC0)，后 14 位为报文内偏移
+ *   - 长度 0 的字节表示域名结束（根标签）
+ *
+ * 参数:
+ *   pkt    — DNS 报文起始指针（用于指针跳转定位）
+ *   pkt_len — DNS 报文总长度
+ *   pos    — 当前待解析的域名起始位置
+ *   out    — 输出缓冲区（存放解压后的字符串如 "www.example.com"）
+ *   outlen — 输出缓冲区大小
+ *   consumed — [输出] 在 pos 位置消耗的字节数（用于调用方跳过此域名）
+ *
+ * 返回: 解压后域名的字符串长度（不含 NUL），失败返回 -1。
+ */
+static int dns_name_uncompress(const uint8_t *pkt, size_t pkt_len,
+                               const uint8_t *pos, char *out, size_t outlen,
+                               size_t *consumed)
+{
+    if (pkt == NULL || pos == NULL || out == NULL || outlen == 0)
+        return -1;
+
+    size_t written = 0;       /* 写入 out 的字符数 */
+    size_t consumed_val = 0;  /* 原始位置消耗的字节数 */
+    int jumped = 0;           /* 已跟随过压缩指针 */
+    size_t jumps = 0;         /* 防止循环指针 */
+    const uint8_t *curr = pos;
+
+    while (1) {
+        /* 越界检查 */
+        if ((size_t)(curr - pkt) >= pkt_len) {
+            LOG_ERROR("dns_name: position out of bounds");
+            return -1;
+        }
+
+        uint8_t b = curr[0];
+
+        /* ——— 压缩指针 ——— */
+        if ((b & 0xC0) == 0xC0) {
+            if ((size_t)(curr - pkt + 1) >= pkt_len) {
+                LOG_ERROR("dns_name: pointer truncated");
+                return -1;
+            }
+
+            if (!jumped) {
+                consumed_val += 2;  /* 指针本身占 2 字节 */
+                jumped = 1;
+            }
+
+            uint16_t offset = ((uint16_t)(b & 0x3F) << 8) | curr[1];
+            if (offset >= pkt_len) {
+                LOG_ERROR("dns_name: pointer offset %u out of range", offset);
+                return -1;
+            }
+
+            curr = pkt + offset;
+            jumps++;
+            if (jumps > 255) {    /* 防止循环或过长链 */
+                LOG_ERROR("dns_name: too many pointer jumps");
+                return -1;
+            }
+            continue;
+        }
+
+        /* ——— 普通标签或终止符 ——— */
+        if (b > 63) {
+            LOG_ERROR("dns_name: invalid label length %u", b);
+            return -1;  /* 高 2 位不是 00 也不是 11 */
+        }
+
+        if (b == 0) {
+            /* 终止符 */
+            if (!jumped)
+                consumed_val += 1;
+            break;
+        }
+
+        /* 标签数据越界检查 */
+        if ((size_t)(curr - pkt + 1 + b) > pkt_len) {
+            LOG_ERROR("dns_name: label data truncated");
+            return -1;
+        }
+
+        /* 写入标签前加点（非首个标签） */
+        if (written > 0) {
+            if (written >= outlen - 1) {
+                LOG_ERROR("dns_name: output buffer too small");
+                return -1;
+            }
+            out[written++] = '.';
+        }
+
+        /* 复制标签字节 */
+        for (uint8_t i = 0; i < b; i++) {
+            if (written >= outlen - 1) {
+                LOG_ERROR("dns_name: output buffer too small");
+                return -1;
+            }
+            out[written++] = curr[1 + i];
+        }
+
+        if (!jumped)
+            consumed_val += 1 + b;
+
+        curr += 1 + b;
+    }
+
+    out[written] = '\0';
+
+    if (consumed)
+        *consumed = consumed_val;
+
+    return (int)written;
+}
+
+/* ============================================================
+ *                     parse_dns — RFC 1035
+ * ============================================================ */
+
+/*
+ * 解析一段以 DNS 消息头起始的数据。
+ * 打印头信息（ID、QR、Opcode、RCODE、计数），
+ * 提取查询区中的域名（主要目的），并简要解析回答区的 A/AAAA/CNAME 记录。
+ */
+int parse_dns(const uint8_t *pkt, size_t len)
+{
+    if (pkt == NULL) {
+        LOG_ERROR("parse_dns: null packet");
+        return -1;
+    }
+    if (len < DNS_HDR_LEN) {
+        LOG_ERROR("parse_dns: truncated header (len=%zu, need=%u)",
+                  len, DNS_HDR_LEN);
+        return -1;
+    }
+
+    const struct dns_hdr *h = (const struct dns_hdr *)pkt;
+
+    uint16_t id      = ntohs(h->id);
+    uint16_t flags   = ntohs(h->flags);
+    uint16_t qdcount = ntohs(h->qdcount);
+    uint16_t ancount = ntohs(h->ancount);
+    uint16_t nscount = ntohs(h->nscount);
+    uint16_t arcount = ntohs(h->arcount);
+
+    int is_response = (flags & DNS_FLAG_QR) ? 1 : 0;
+    int opcode  = (flags & DNS_FLAG_OPCODE_MASK) >> 11;
+    int rcode   = flags & DNS_FLAG_RCODE_MASK;
+
+    const char *op_str;
+    switch (opcode) {
+    case 0:  op_str = "QUERY";  break;
+    case 1:  op_str = "IQUERY"; break;
+    case 2:  op_str = "STATUS"; break;
+    default: op_str = "?";      break;
+    }
+
+    printf("DNS : id=0x%04x %s op=%s qd=%u an=%u ns=%u ar=%u",
+           id, is_response ? "Response" : "Query",
+           op_str, qdcount, ancount, nscount, arcount);
+    if (is_response)
+        printf(" rcode=%u%s", rcode, rcode == 0 ? "(OK)" : "");
+    printf("\n");
+
+    /* ================================================================
+     *  解析问题区 (Question Section) — 提取查询域名
+     * ================================================================ */
+
+    const uint8_t *qpos = pkt + DNS_HDR_LEN;
+    size_t remaining = len - DNS_HDR_LEN;
+    char qname[256];
+
+    for (uint16_t i = 0; i < qdcount && remaining > 0; i++) {
+        size_t consumed = 0;
+        int ret = dns_name_uncompress(pkt, len, qpos, qname, sizeof(qname),
+                                      &consumed);
+        if (ret < 0)
+            break;
+        if (consumed == 0 || consumed > remaining)
+            break;
+
+        qpos += consumed;
+        remaining -= consumed;
+
+        /* QTYPE (2) + QCLASS (2) */
+        if (remaining < 4)
+            break;
+
+        uint16_t qtype  = ntohs(*(const uint16_t *)qpos);
+        uint16_t qclass = ntohs(*(const uint16_t *)(qpos + 2));
+        qpos += 4;
+        remaining -= 4;
+
+        const char *tname = NULL;
+        switch (qtype) {
+        case DNS_TYPE_A:     tname = "A";     break;
+        case DNS_TYPE_AAAA:  tname = "AAAA";  break;
+        case DNS_TYPE_CNAME: tname = "CNAME"; break;
+        case DNS_TYPE_NS:    tname = "NS";    break;
+        case DNS_TYPE_MX:    tname = "MX";    break;
+        case DNS_TYPE_TXT:   tname = "TXT";   break;
+        case DNS_TYPE_PTR:   tname = "PTR";   break;
+        case DNS_TYPE_SOA:   tname = "SOA";   break;
+        case DNS_TYPE_SRV:   tname = "SRV";   break;
+        }
+
+        printf("DNS :   query[%u]: %s (%s, class=%u)\n",
+               i, qname, tname ? tname : "?", qclass);
+    }
+
+    /* ================================================================
+     *  简要解析回答区 (Answer Section) — A/AAAA/CNAME
+     * ================================================================ */
+
+    const uint8_t *rpos = qpos;
+    size_t ans_remaining = remaining;
+    uint16_t parsed_answers = 0;
+    char aname[256];
+
+    for (uint16_t i = 0; i < ancount && ans_remaining > 4; i++) {
+        size_t consumed = 0;
+        int ret = dns_name_uncompress(pkt, len, rpos, aname, sizeof(aname),
+                                      &consumed);
+        if (ret < 0)
+            break;
+        if (consumed == 0 || consumed > ans_remaining)
+            break;
+
+        rpos += consumed;
+        ans_remaining -= consumed;
+
+        /* TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 字节固定头 */
+        if (ans_remaining < 10)
+            break;
+
+        uint16_t rtype   = ntohs(*(const uint16_t *)rpos);
+        /* uint16_t rclass = ntohs(*(const uint16_t *)(rpos + 2)); */
+        /* uint32_t ttl    = ntohl(*(const uint32_t *)(rpos + 4)); */
+        uint16_t rdlength = ntohs(*(const uint16_t *)(rpos + 8));
+
+        rpos += 10;
+        ans_remaining -= 10;
+
+        if (rdlength > ans_remaining)
+            break;
+
+        /* 按类型打印 RDATA */
+        switch (rtype) {
+        case DNS_TYPE_A: {
+            /* A 记录: 4 字节 IPv4 地址 */
+            if (rdlength >= 4) {
+                char ip_str[INET_ADDRSTRLEN];
+                struct in_addr addr;
+                memcpy(&addr.s_addr, rpos, 4);
+                inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+                printf("DNS :   answer[%u]: %s -> A %s\n",
+                       parsed_answers, aname, ip_str);
+            }
+            break;
+        }
+        case DNS_TYPE_AAAA: {
+            /* AAAA 记录: 16 字节 IPv6 地址 */
+            if (rdlength >= 16) {
+                char ip6_str[INET6_ADDRSTRLEN];
+                struct in6_addr addr6;
+                memcpy(&addr6, rpos, 16);
+                inet_ntop(AF_INET6, &addr6, ip6_str, sizeof(ip6_str));
+                printf("DNS :   answer[%u]: %s -> AAAA %s\n",
+                       parsed_answers, aname, ip6_str);
+            }
+            break;
+        }
+        case DNS_TYPE_CNAME: {
+            /* CNAME 记录: RDATA 为压缩域名 */
+            char cname[256];
+            if (dns_name_uncompress(pkt, len, rpos, cname, sizeof(cname), NULL) > 0) {
+                printf("DNS :   answer[%u]: %s -> CNAME %s\n",
+                       parsed_answers, aname, cname);
+            }
+            break;
+        }
+        default:
+            /* 其他类型，只打印类型号 */
+            printf("DNS :   answer[%u]: %s -> type=%u rdlen=%u\n",
+                   parsed_answers, aname, rtype, rdlength);
+            break;
+        }
+
+        parsed_answers++;
+        rpos += rdlength;
+        ans_remaining -= rdlength;
+
+        /* 最多解析前 20 条回答，防止畸形包 */
+        if (parsed_answers >= 20)
+            break;
+    }
+
+    return 0;
+}
+
+/* ============================================================
+ *                     parse_http — RFC 7230
+ * ============================================================ */
+
+/*
+ * 解析一段以 HTTP 请求/响应起始的数据。
+ * 从 TCP 载荷中找到第一行（以 \r\n 或 \n 结束），
+ * 判断是请求行（GET /path HTTP/1.1）还是响应行（HTTP/1.1 200 OK），
+ * 提取并打印关键字段。
+ *
+ * 注意：本函数不依赖 TCP 重组，只能解析落在单个 TCP 段内的 HTTP 首行。
+ *       分片的 HTTP 数据需等 TCP 重组（Day 6+）才能完整解析。
+ */
+int parse_http(const uint8_t *pkt, size_t len)
+{
+    if (pkt == NULL) {
+        LOG_ERROR("parse_http: null packet");
+        return -1;
+    }
+    if (len == 0)
+        return 0;
+
+    /* 查找行尾（\n），兼容 \r\n 和 \n */
+    size_t line_len = 0;
+    int has_line = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (pkt[i] == '\n') {
+            line_len = i;
+            /* 去掉行尾 \r */
+            if (line_len > 0 && pkt[line_len - 1] == '\r')
+                line_len--;
+            has_line = 1;
+            break;
+        }
+    }
+    if (!has_line || line_len == 0)
+        return 0;  /* 不完整的行或者空行，静默返回 */
+
+    /* NUL 结尾方便字符串操作 */
+    char buf[512];
+    size_t copy_len = (line_len < sizeof(buf) - 1) ? line_len : sizeof(buf) - 1;
+    memcpy(buf, pkt, copy_len);
+    buf[copy_len] = '\0';
+
+    /* 检查是否可打印（避免垃圾数据） */
+    for (size_t i = 0; i < copy_len; i++) {
+        if (buf[i] != '\t' && buf[i] != ' ' &&
+            (buf[i] < 0x20 || buf[i] > 0x7E)) {
+            return 0;  /* 含不可打印字符，非 HTTP */
+        }
+    }
+
+    /* ——— 响应行: "HTTP/1.1 200 OK" ——— */
+    if (copy_len >= 5 && strncmp(buf, "HTTP/", 5) == 0) {
+        char version[16] = "";
+        int status_code  = 0;
+        int n = sscanf(buf, "%15s %d", version, &status_code);
+
+        if (n >= 2) {
+            const char *desc = NULL;
+            switch (status_code) {
+            case 200: desc = "OK";                break;
+            case 201: desc = "Created";           break;
+            case 204: desc = "No Content";        break;
+            case 301: desc = "Moved Permanently"; break;
+            case 302: desc = "Found";             break;
+            case 304: desc = "Not Modified";      break;
+            case 400: desc = "Bad Request";       break;
+            case 401: desc = "Unauthorized";      break;
+            case 403: desc = "Forbidden";         break;
+            case 404: desc = "Not Found";         break;
+            case 405: desc = "Method Not Allowed"; break;
+            case 500: desc = "Internal Server Error"; break;
+            case 502: desc = "Bad Gateway";       break;
+            case 503: desc = "Service Unavailable"; break;
+            }
+
+            printf("HTTP: Response %s %d", version, status_code);
+            if (desc)
+                printf(" %s", desc);
+            printf("\n");
+        }
+        return 0;
+    }
+
+    /* ——— 请求行: "GET /path HTTP/1.1" ——— */
+    /* 已知 HTTP 方法列表 */
+    static const char *known_methods[] = {
+        "GET", "POST", "HEAD", "PUT", "DELETE",
+        "CONNECT", "OPTIONS", "TRACE", "PATCH",
+        NULL
+    };
+
+    /* 检查是否以已知方法开头 */
+    int is_http = 0;
+    size_t method_len = 0;
+    for (int mi = 0; known_methods[mi]; mi++) {
+        size_t mlen = strlen(known_methods[mi]);
+        if (copy_len > mlen && buf[mlen] == ' ' &&
+            strncmp(buf, known_methods[mi], mlen) == 0) {
+            is_http = 1;
+            method_len = mlen;
+            break;
+        }
+    }
+
+    if (is_http) {
+        char method[16] = "", uri[256] = "", version[16] = "";
+        int n = sscanf(buf, "%15s %255s %15s", method, uri, version);
+
+        if (n >= 2) {
+            if (n >= 3)
+                printf("HTTP: %s %s %s\n", method, uri, version);
+            else
+                printf("HTTP: %s %s\n", method, uri);
+        }
+    }
 
     return 0;
 }
