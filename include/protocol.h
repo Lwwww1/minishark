@@ -170,6 +170,53 @@ struct icmp_hdr {
 } __attribute__((packed));
 
 /* ============================================================
+ *  DNS — RFC 1035
+ *  固定首部 12 字节
+ * ============================================================ */
+
+#define DNS_HDR_LEN 12
+#define DNS_PORT    53
+
+/* DNS 标志位 (flags 字段，网络字节序展开后使用) */
+#define DNS_FLAG_QR        0x8000  /* 查询(0) / 响应(1) */
+#define DNS_FLAG_OPCODE_MASK 0x7800  /* 操作码掩码 */
+#define DNS_FLAG_AA        0x0400  /* Authoritative Answer */
+#define DNS_FLAG_TC        0x0200  /* Truncation */
+#define DNS_FLAG_RD        0x0100  /* Recursion Desired */
+#define DNS_FLAG_RA        0x0080  /* Recursion Available */
+#define DNS_FLAG_RCODE_MASK 0x000F /* 响应码掩码 */
+
+/* DNS 资源记录类型 (QTYPE / TYPE) */
+#define DNS_TYPE_A     1   /* IPv4 地址 */
+#define DNS_TYPE_NS    2   /* 域名服务器 */
+#define DNS_TYPE_CNAME 5   /* 别名 (规范名称) */
+#define DNS_TYPE_SOA   6   /* Start Of Authority */
+#define DNS_TYPE_PTR   12  /* 指针记录 */
+#define DNS_TYPE_MX    15  /* 邮件交换 */
+#define DNS_TYPE_TXT   16  /* 文本记录 */
+#define DNS_TYPE_AAAA  28  /* IPv6 地址 */
+#define DNS_TYPE_SRV   33  /* 服务定位 */
+
+/* DNS 类 (QCLASS / CLASS) */
+#define DNS_CLASS_IN   1   /* Internet */
+
+struct dns_hdr {
+    uint16_t id;        /* 会话标识 */
+    uint16_t flags;     /* 标志字段 */
+    uint16_t qdcount;   /* 问题数 (Question Count) */
+    uint16_t ancount;   /* 回答数 (Answer Count) */
+    uint16_t nscount;   /* 授权数 (Authority Count) */
+    uint16_t arcount;   /* 附加数 (Additional Count) */
+} __attribute__((packed));
+
+/* ============================================================
+ *  HTTP — RFC 7230
+ * ============================================================ */
+
+#define HTTP_PORT    80
+#define HTTP_PORT_ALT 8080
+
+/* ============================================================
  *                 协议解析函数声明
  *  所有 parser 接受从当前层起始的字节流和长度，
  *  解析失败（截断、字段越界）时返回 -1，成功返回 0。
@@ -182,5 +229,7 @@ int parse_ipv6(const uint8_t *pkt, size_t len);
 int parse_tcp (const uint8_t *pkt, size_t len);
 int parse_udp (const uint8_t *pkt, size_t len);
 int parse_icmp(const uint8_t *pkt, size_t len, int is_ipv6);
+int parse_dns (const uint8_t *pkt, size_t len);
+int parse_http(const uint8_t *pkt, size_t len);
 
 #endif /* PROTOCOL_H */
