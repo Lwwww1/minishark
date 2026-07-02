@@ -46,13 +46,13 @@ void dispatch_packet(const struct pcap_pkthdr *header, const u_char *packet)
         return;
     }
 
-    /* 流量统计（端口号分类） */
-    stats_update(packet, header->len);
-
     /* 委托给 B 同学的逐层解析：ETH → IP → TCP/UDP/ICMP */
     parse_eth(packet, header->caplen);
 
     printf("\n");
+
+    /* 流量统计（放在包末尾，不打断解析输出） */
+    stats_update(packet, header->len);
 }
 
 /* ================================================================
