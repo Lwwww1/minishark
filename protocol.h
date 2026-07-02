@@ -89,7 +89,7 @@ struct ipv6_hdr {
     uint8_t  dst[IPV6_ADDR_LEN]; /* 目的 IPv6 地址 */
 } __attribute__((packed));
 
-#define IPV6_VERSION(hdr) (((hdr)->ver_tc_fl >> 28) & 0x0F)
+#define IPV6_VERSION(hdr) (((ntohl((hdr)->ver_tc_fl)) >> 28) & 0x0F)
 
 /* ============================================================
  *  TCP — RFC 793

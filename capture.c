@@ -13,6 +13,7 @@
 #include "capture.h"
 #include "filter.h"
 #include "protocol.h"
+#include "stats.h"
 
 /* ================================================================
  *  内部状态
@@ -44,6 +45,9 @@ void dispatch_packet(const struct pcap_pkthdr *header, const u_char *packet)
         printf("  (VLAN-tagged, skipped)\n\n");
         return;
     }
+
+    /* 流量统计（端口号分类） */
+    stats_update(packet, header->len);
 
     /* 委托给 B 同学的逐层解析：ETH → IP → TCP/UDP/ICMP */
     parse_eth(packet, header->caplen);
