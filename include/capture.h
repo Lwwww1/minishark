@@ -13,6 +13,9 @@
 
 #include <pcap.h>
 
+/* 前向声明 */
+typedef struct ring_buffer_t ring_buffer_t;
+
 /* 初始化抓包引擎 */
 pcap_t *capture_init(const char *iface, const char *filter_expr);
 
@@ -30,5 +33,8 @@ void dispatch_packet(const struct pcap_pkthdr *header, const u_char *packet);
 
 /* 设置 PCAP 输出文件（-w 参数），每个捕获的包自动写入 */
 void capture_set_dumper(pcap_dumper_t *dumper);
+
+/* 设置环形缓冲区（多线程模式），回调中 push 包到 buffer 而非直接解析 */
+void capture_set_ring_buffer(ring_buffer_t *rb);
 
 #endif /* CAPTURE_H */

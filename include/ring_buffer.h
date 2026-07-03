@@ -28,7 +28,7 @@ struct rb_slot {
 };
 
 /* 环形缓冲区 */
-typedef struct {
+typedef struct ring_buffer_t {
     struct rb_slot *slots;           /* 槽位数组 */
     int             capacity;        /* 总槽位数 */
     int             head;            /* 消费者读取位置 */
@@ -53,5 +53,12 @@ void rb_push(ring_buffer_t *rb, const struct pcap_pkthdr *header,
 /* packet 缓冲区至少 MAX_PKT_SIZE 字节 */
 void rb_pop(ring_buffer_t *rb, struct pcap_pkthdr *header,
             uint8_t *packet, uint32_t *len);
+
+/* 带超时的 pop：timeout_ms 毫秒内无数据返回 0，拿到数据返回 1 */
+int rb_pop_timeout(ring_buffer_t *rb, struct pcap_pkthdr *header,
+                   uint8_t *packet, uint32_t *len, int timeout_ms);
+
+/* 返回当前缓冲区中的元素个数（近似值） */
+int rb_count(ring_buffer_t *rb);
 
 #endif /* RING_BUFFER_H */
