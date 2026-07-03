@@ -1,5 +1,7 @@
 #include "common.h"
 #include "capture.h"
+#include "filter.h"
+#include "pcap_io.h"
 
 volatile int g_running = 1;
 
@@ -42,22 +44,48 @@ int main(int argc, char *argv[]) {
 
     LOG_INFO("minishark starting...");
 
-    /* Day 2: 初始化抓包引擎 */
-    pcap_t *handle = capture_init(iface, filter_expr);
-    if (handle == NULL) {
-        LOG_ERROR("failed to initialize capture engine");
-        return 1;
+    pcap_t        *handle  = NULL;
+    pcap_dumper_t *dumper  = NULL;
+
+    if (read_file != NULL) {
+        /* ---- 离线回放模式 ---- */
+        char errbuf[PCAP_ERRBUF_SIZE];
+        handle = pcap_read_open(read_file, errbuf);
+        if (handle == NULL) {
+            LOG_ERROR("failed to open pcap file: %s", errbuf);
+            return 1;
+        }
+
+        /* 离线模式也需要支持 BPF 过滤 */
+        if (filter_compile(handle, filter_expr, iface) != 0) {
+            LOG_ERROR("filter setup failed");
+            capture_stop(handle);
+            return 1;
+        }
+    } else {
+        /* ---- 实时抓包模式 ---- */
+        handle = capture_init(iface, filter_expr);
+        if (handle == NULL) {
+            LOG_ERROR("failed to initialize capture engine");
+            return 1;
+        }
+
+        if (write_file != NULL) {
+            dumper = pcap_write_open(write_file, handle);
+            if (dumper == NULL) {
+                LOG_ERROR("failed to open output file");
+                capture_stop(handle);
+                return 1;
+            }
+            capture_set_dumper(dumper);
+        }
     }
 
-    /* Day 5 (预留): 如果指定了 -r 则读取 pcap 文件，否则实时抓包 */
-    /* Day 5 (预留): 如果指定了 -w 则开启 pcap 文件写入 */
-    (void)read_file;
-    (void)write_file;
-
-    /* 启动抓包循环（阻塞直到 Ctrl+C） */
+    /* 启动抓包/回放循环（阻塞直到 EOF 或 Ctrl+C） */
     capture_start(handle);
 
     /* 清理 */
+    if (dumper) pcap_write_close(dumper);
     capture_stop(handle);
 
     LOG_INFO("minishark stopped.");

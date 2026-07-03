@@ -19,7 +19,8 @@
  *  内部状态
  * ================================================================ */
 
-static pcap_t *g_handle = NULL;   /* 供 capture_break 访问 */
+static pcap_t        *g_handle = NULL;   /* 供 capture_break 访问 */
+static pcap_dumper_t *g_dumper = NULL;   /* -w 输出文件 */
 
 /* ================================================================
  *  包分发 → B 同学的 parse_eth()
@@ -63,6 +64,12 @@ static void pcap_callback(u_char *user, const struct pcap_pkthdr *header,
                           const u_char *packet)
 {
     (void)user;
+
+    /* 若指定了 -w，每个包自动写入 pcap 文件 */
+    if (g_dumper) {
+        pcap_dump((u_char *)g_dumper, header, packet);
+    }
+
     dispatch_packet(header, packet);
 }
 
@@ -153,6 +160,11 @@ void capture_stop(pcap_t *handle)
         g_handle = NULL;
         LOG_INFO("capture resources released");
     }
+}
+
+void capture_set_dumper(pcap_dumper_t *dumper)
+{
+    g_dumper = dumper;
 }
 
 void capture_break(void)
