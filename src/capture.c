@@ -39,15 +39,7 @@ void dispatch_packet(const struct pcap_pkthdr *header, const u_char *packet)
            (unsigned long)header->ts.tv_usec,
            header->len, header->caplen);
 
-    /* VLAN (802.1Q) 跳过：parse_eth 尚未支持 VLAN 剥离，
-     * 这里遇到 VLAN 帧时直接跳过（局域网内不常见） */
-    const struct eth_hdr *eth = (const struct eth_hdr *)packet;
-    if (ntohs(eth->type) == ETH_TYPE_VLAN) {
-        printf("  (VLAN-tagged, skipped)\n\n");
-        return;
-    }
-
-    /* 委托给 B 同学的逐层解析：ETH → IP → TCP/UDP/ICMP */
+    /* 委托协议解析：ETH → IP → TCP/UDP/ICMP（VLAN 标签由 parse_eth 内处理） */
     parse_eth(packet, header->caplen);
 
     printf("\n");

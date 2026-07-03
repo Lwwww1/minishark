@@ -43,7 +43,7 @@ static const char *ipv4_proto_name(uint8_t proto)
     }
 }
 
-/* IPv6 next header 名称（与 IPv4 共用同一组常量） */
+/* IPv6 next header 名称（含 IPv4 特定 + IPv6 扩展头） */
 static const char *ipv6_next_name(uint8_t next)
 {
     switch (next) {
@@ -51,6 +51,13 @@ static const char *ipv6_next_name(uint8_t next)
     case IP_PROTO_TCP:    return "TCP";
     case IP_PROTO_UDP:    return "UDP";
     case IP_PROTO_ICMPV6: return "ICMPv6";
+    case IPV6_NEXT_HOPOPT:   return "Hop-by-Hop";
+    case IPV6_NEXT_ROUTING:  return "Routing";
+    case IPV6_NEXT_FRAGMENT: return "Fragment";
+    case IPV6_NEXT_AH:       return "AH";
+    case IPV6_NEXT_ESP:      return "ESP";
+    case IPV6_NEXT_DSTOPT:   return "Dest Opt";
+    case IPV6_NEXT_NONE:     return "No Next";
     default:              return NULL;
     }
 }
@@ -89,13 +96,19 @@ static void format_ipv6(const uint8_t *addr, char *out, size_t outlen)
 /* IPv4 frag_off 字段中 flag 集合转字符串，例如 "DF" / "MF" / "DF+MF" / "" */
 static const char *ipv4_frag_flags_str(uint16_t frag_off /* 网络字节序 */)
 {
-    /* 主机序 flags 位 */
     static char buf[16];
     uint16_t flags = ntohs(frag_off) >> 13;  /* 高 3 位 */
     buf[0] = '\0';
-    if (flags & 0x4) strcat(buf, "DF");
-    if (flags & 0x2) { if (buf[0]) strcat(buf, "+"); strcat(buf, "MF"); }
-    if (flags & 0x1) { if (buf[0]) strcat(buf, "+"); strcat(buf, "RF"); }
+    size_t pos = 0;
+    /* DF */
+    if (flags & 0x4)
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%sDF", pos == 0 ? "" : "+");
+    /* MF */
+    if (flags & 0x2)
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%sMF", pos == 0 ? "" : "+");
+    /* RF */
+    if (flags & 0x1)
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%sRF", pos == 0 ? "" : "+");
     return buf;
 }
 
@@ -104,17 +117,46 @@ static const char *ipv4_frag_flags_str(uint16_t frag_off /* 网络字节序 */)
 static const char *tcp_flags_str(uint8_t flags)
 {
     static char buf[32];
+    size_t pos = 0;
     buf[0] = '\0';
+
     /* 顺序与 tcpdump 习惯一致：SYN/ACK/FIN/RST/PSH/URG/ECE/CWR */
-    if (flags & TCP_FLAG_SYN) strcat(buf, "SYN");
-    if (flags & TCP_FLAG_ACK) { if (buf[0]) strcat(buf, "+"); strcat(buf, "ACK"); }
-    if (flags & TCP_FLAG_FIN) { if (buf[0]) strcat(buf, "+"); strcat(buf, "FIN"); }
-    if (flags & TCP_FLAG_RST) { if (buf[0]) strcat(buf, "+"); strcat(buf, "RST"); }
-    if (flags & TCP_FLAG_PSH) { if (buf[0]) strcat(buf, "+"); strcat(buf, "PSH"); }
-    if (flags & TCP_FLAG_URG) { if (buf[0]) strcat(buf, "+"); strcat(buf, "URG"); }
-    if (flags & TCP_FLAG_ECE) { if (buf[0]) strcat(buf, "+"); strcat(buf, "ECE"); }
-    if (flags & TCP_FLAG_CWR) { if (buf[0]) strcat(buf, "+"); strcat(buf, "CWR"); }
-    if (buf[0] == '\0') strcpy(buf, "None");
+    if (flags & TCP_FLAG_SYN) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%s", "SYN");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_ACK) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sACK", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_FIN) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sFIN", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_RST) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sRST", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_PSH) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sPSH", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_URG) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sURG", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_ECE) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sECE", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+    if (flags & TCP_FLAG_CWR) {
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sCWR", pos == 0 ? "" : "+");
+        if (n > 0 && (size_t)n < sizeof(buf) - pos) pos += n;
+    }
+
+    if (buf[0] == '\0') {
+        snprintf(buf, sizeof(buf), "None");
+    }
     return buf;
 }
 
@@ -131,6 +173,15 @@ static const char *icmp_type_name(uint8_t type, int is_ipv6)
         case ICMP_TYPE_ECHO_REQUEST:  return "Echo Request";
         case ICMP_TYPE_TIME_EXCEEDED: return "Time Exceeded";
         case ICMP_TYPE_PARAM_PROBLEM: return "Parameter Problem";
+        case 9:                       return "Router Advertisement";
+        case 10:                      return "Router Selection";
+        case 13:                      return "Timestamp Request";
+        case 14:                      return "Timestamp Reply";
+        case 15:                      return "Information Request";
+        case 16:                      return "Information Reply";
+        case 17:                      return "Address Mask Request";
+        case 18:                      return "Address Mask Reply";
+        case 30:                      return "Traceroute";
         default:                      return NULL;
         }
     } else {
@@ -138,6 +189,17 @@ static const char *icmp_type_name(uint8_t type, int is_ipv6)
         case ICMPV6_TYPE_DEST_UNREACH: return "Destination Unreachable";
         case ICMPV6_TYPE_ECHO_REQUEST: return "Echo Request";
         case ICMPV6_TYPE_ECHO_REPLY:   return "Echo Reply";
+        case 2:                        return "Packet Too Big";
+        case 3:                        return "Time Exceeded";
+        case 4:                        return "Parameter Problem";
+        case 130:                      return "MLD Query";
+        case 131:                      return "MLD Report";
+        case 132:                      return "MLD Done";
+        case 133:                      return "NDP Router Solicitation";
+        case 134:                      return "NDP Router Advertisement";
+        case 135:                      return "NDP Neighbor Solicitation";
+        case 136:                      return "NDP Neighbor Advertisement";
+        case 137:                      return "NDP Redirect";
         default:                       return NULL;
         }
     }
@@ -205,13 +267,23 @@ int parse_ipv4(const uint8_t *pkt, size_t len)
            ident, flags, frag_ofs,
            ntohs(h->checksum));
 
-    /* Day 3：依据 proto 分发到 L4 parser。
-     * 载荷起点 = pkt + ihl；长度取 min(总长-IHL, 缓冲区剩余)，避免越过 IP 包边界。 */
+    /* —— IPv4 分片处理 ——
+     * 仅解析第一个分片 (frag_ofs == 0)；非首分片缺少 L4 头，跳过。 */
+    if (frag_ofs != 0) {
+        return 0;
+    }
+
+    /* 根据 proto 分发到 L4 parser。
+     * 载荷起点 = pkt + ihl；长度取 min(total_len-ihl, 缓冲区剩余)，避免越过 IP 包边界。 */
     const uint8_t *l4 = pkt + ihl;
     size_t l4_len = len - ihl;
-    if (total_len > ihl) {
+    if (total_len >= ihl) {
         size_t from_total = (size_t)total_len - ihl;
         if (from_total < l4_len) l4_len = from_total;
+    } else {
+        /* total_len < ihl：无效的 IP 包 */
+        LOG_ERROR("parse_ipv4: total_len(%u) < ihl(%zu)", total_len, ihl);
+        return -1;
     }
     if (l4_len == 0) {
         return 0;  /* 仅 IP 头，无载荷 */
@@ -242,9 +314,9 @@ int parse_ipv4(const uint8_t *pkt, size_t len)
 
 /*
  * 解析一段以 IPv6 头起始的数据。
- * IPv6 固定首部 40 字节，无 options；本函数不处理扩展头（hop-by-hop、
- * routing、fragment 等），遇到 next_hdr == 41/0/43/44/50/51/60 等扩展头类型
- * 时仅打印提示并返回，由 Day 3+ 后续工作补全。
+ * IPv6 固定首部 40 字节，后跟零或多个扩展头。
+ * 本函数会遍历扩展头链（hop-by-hop、routing、fragment、destination、AH），
+ * 直到找到可识别的 L4 协议（TCP/UDP/ICMPv6）或遇到终止标记。
  */
 int parse_ipv6(const uint8_t *pkt, size_t len)
 {
@@ -280,35 +352,143 @@ int parse_ipv6(const uint8_t *pkt, size_t len)
            h->next_hdr, nname ? nname : "Unknown",
            h->hop_limit, plen, tc, fl);
 
-    /* Day 3：按 next_hdr 分发到 L4 parser。
-     * 载荷起点 = pkt + 40；长度取 min(payload_len, 缓冲区剩余)。
-     * 注意：本函数尚未剥扩展头（hop-by-hop/routing/fragment 等），
-     *       若 next_hdr 是扩展头类型则会落到 default 分支不解析。 */
+    /* ================================================================
+     *  遍历扩展头链，定位 L4 载荷
+     * ================================================================
+     *  IPv6 扩展头形成一个链表，每个扩展头以 next_hdr 指明下一个头的类型。
+     *
+     *  扩展头格式：
+     *    Hop-by-Hop (0), Routing (43), Dest Opt (60):
+     *      1B next_hdr | 1B hdr_ext_len | ...   × (hdr_ext_len+1)*8 字节
+     *    Fragment (44):
+     *      1B next_hdr | 1B reserved | 2B frag_off | 4B ident = 固定 8 字节
+     *    AH (51):
+     *      1B next_hdr | 1B hdr_ext_len | ...   × (hdr_ext_len+2)*4 字节
+     *    ESP (50): 无 next_hdr 字段，视为终端
+     *    No Next (59): 终端
+     *
+     *  扩展头总长度不应超过 IPv6 payload_len。
+     * ================================================================ */
+
+    uint8_t  next_hdr = h->next_hdr;
     const uint8_t *l4 = pkt + sizeof(struct ipv6_hdr);
-    size_t l4_len = len - sizeof(struct ipv6_hdr);
-    if (plen < l4_len) l4_len = plen;
-    if (l4_len == 0) {
+    size_t remaining = plen;                    /* payload_len 上限 */
+    size_t buf_remaining = len - sizeof(struct ipv6_hdr);
+    if (remaining > buf_remaining)
+        remaining = buf_remaining;              /* 受缓冲区限制 */
+
+    int is_fragmented = 0;
+    int ext_hdr_count = 0;
+    const int MAX_EXT_HDR = 64;                 /* 防止畸形包死循环 */
+
+    while (next_hdr != IP_PROTO_TCP &&
+           next_hdr != IP_PROTO_UDP &&
+           next_hdr != IP_PROTO_ICMP &&
+           next_hdr != IP_PROTO_ICMPV6 &&
+           next_hdr != IPV6_NEXT_NONE) {
+
+        if (ext_hdr_count >= MAX_EXT_HDR) {
+            LOG_ERROR("parse_ipv6: too many extension headers");
+            return -1;
+        }
+        if (remaining < 2) {
+            LOG_ERROR("parse_ipv6: truncated extension header");
+            return -1;
+        }
+
+        size_t eh_len = 0;
+        uint8_t hdr_type = next_hdr;
+
+        /* 读取当前扩展头的 next_hdr */
+        next_hdr = l4[0];
+
+        switch (hdr_type) {
+        case IPV6_NEXT_HOPOPT:
+        case IPV6_NEXT_ROUTING:
+        case IPV6_NEXT_DSTOPT: {
+            /* 通用扩展头：长度 = (hdr_ext_len + 1) * 8 */
+            uint8_t hdr_ext_len = l4[1];
+            eh_len = ((size_t)hdr_ext_len + 1) * 8;
+            break;
+        }
+        case IPV6_NEXT_FRAGMENT: {
+            /* Fragment Header：固定 8 字节 */
+            eh_len = 8;
+            if (remaining >= 8) {
+                uint16_t frag_off_flags_raw;
+                memcpy(&frag_off_flags_raw, l4 + 2, 2);
+                uint16_t frag_off_flags = ntohs(frag_off_flags_raw);
+                uint16_t frag_ofs = frag_off_flags & 0xFFF8; /* 高 13 位 */
+                uint8_t  frag_mf  = frag_off_flags & 0x0001;  /* More Fragments */
+                if (frag_ofs != 0 || frag_mf) {
+                    is_fragmented = 1;
+                }
+                uint32_t frag_ident_raw;
+                memcpy(&frag_ident_raw, l4 + 4, 4);
+                printf("  [IPv6 Fragment: next=%u offset=%u mf=%u id=0x%08x]\n",
+                       next_hdr, frag_ofs >> 3, frag_mf,
+                       ntohl(frag_ident_raw));
+            }
+            break;
+        }
+        case IPV6_NEXT_AH: {
+            /* AH：长度 = (hdr_ext_len + 2) * 4 */
+            uint8_t hdr_ext_len = l4[1];
+            eh_len = ((size_t)hdr_ext_len + 2) * 4;
+            break;
+        }
+        case IPV6_NEXT_ESP: {
+            /* ESP：无 next_hdr 字段，视为终端 */
+            return 0;
+        }
+        default:
+            /* 不认识的扩展头类型 — 终止遍历（将 next_hdr 交给 L4 分发尝试） */
+            goto done_traversal;
+        }
+
+        if (eh_len == 0 || eh_len > remaining) {
+            LOG_ERROR("parse_ipv6: extension header %u length %zu > remaining %zu",
+                      hdr_type, eh_len, remaining);
+            return -1;
+        }
+
+        l4 += eh_len;
+        remaining -= eh_len;
+        ext_hdr_count++;
+    }
+
+done_traversal:
+
+    if (next_hdr == IPV6_NEXT_NONE) {
+        return 0;   /* 无后续载荷 */
+    }
+
+    /* 非首分片缺少 L4 头，跳过 */
+    if (is_fragmented) {
         return 0;
     }
 
+    if (remaining == 0) {
+        return 0;   /* 仅扩展头，无载荷 */
+    }
+
     int rc = 0;
-    switch (h->next_hdr) {
+    switch (next_hdr) {
     case IP_PROTO_TCP:
-        rc = parse_tcp(l4, l4_len);
+        rc = parse_tcp(l4, remaining);
         break;
     case IP_PROTO_UDP:
-        rc = parse_udp(l4, l4_len);
+        rc = parse_udp(l4, remaining);
         break;
     case IP_PROTO_ICMP:
         /* IPv6 中 next_hdr=1 极少见，按 ICMPv4 处理以防误判 */
-        rc = parse_icmp(l4, l4_len, 0);
+        rc = parse_icmp(l4, remaining, 0);
         break;
     case IP_PROTO_ICMPV6:
-        rc = parse_icmp(l4, l4_len, 1);
+        rc = parse_icmp(l4, remaining, 1);
         break;
     default:
-        /* 扩展头类型（hop-by-hop=0, routing=43, fragment=44, dest opt=60, AH=51）
-         * 或未识别协议：不递归，Day 4+ 再补扩展头剥离。 */
+        /* 未识别的 L4 协议：不递归 */
         break;
     }
 
@@ -323,9 +503,9 @@ int parse_ipv6(const uint8_t *pkt, size_t len)
  * 以太网入口。pkt 指向整包开头（libpcap 回调链路层），len 为整包可用字节数。
  * 成功解析后打印 MAC + EtherType；若是 IPv4/IPv6 则继续下钻到对应 parser。
  *
- * 注意：本函数默认入参不含 802.1Q VLAN tag；若上层确实见到了 VLAN 帧，
- * libpcap 在多数抓包场景下已经把它剥离（datalink == DLT_EN10MB），
- * 否则调用方需要先自行处理 4 字节 VLAN tag 再调用本函数。
+ * 支持 802.1Q VLAN 标签（TPID=0x8100）：自动跳过 4 字节 VLAN 头，
+ * 打印 VID/DEI/PCP 信息后以内层 EtherType 继续分发。
+ * 不处理 Q-in-Q（0x88a8 嵌套 VLAN）。
  */
 int parse_eth(const uint8_t *pkt, size_t len)
 {
@@ -345,16 +525,46 @@ int parse_eth(const uint8_t *pkt, size_t len)
     format_mac(h->dst, dmac, sizeof(dmac));
     format_mac(h->src, smac, sizeof(smac));
 
-    /* type 字段已是网络字节序，但此处仅用作查表/打印，统一转主机序以便人读 */
     uint16_t type = ntohs(h->type);
     const char *tname = ethertype_name(type);
 
     printf("ETH : %s -> %s | type=0x%04x(%s)\n",
            smac, dmac, type, tname ? tname : "Unknown");
 
-    /* 继续下钻：载荷起点 = pkt + 14，长度 = len - 14 */
+    /* 载荷指针（可能含 VLAN tag） */
     const uint8_t *payload = pkt + ETH_HDR_LEN;
     size_t plen = len - ETH_HDR_LEN;
+
+    /* ——— 802.1Q VLAN 标签处理 ——— */
+    if (type == ETH_TYPE_VLAN) {
+        if (plen < 4) {
+            LOG_WARN("parse_eth: truncated VLAN tag");
+            return 0;
+        }
+        uint16_t tci_raw;
+        memcpy(&tci_raw, payload, 2);
+        uint16_t tci = ntohs(tci_raw);
+        uint8_t  pcp = (tci >> 13) & 0x07;
+        uint8_t  dei = (tci >> 12) & 0x01;
+        uint16_t vid = tci & 0x0FFF;
+        printf("  [VLAN: PCP=%u DEI=%u VID=%u]\n", pcp, dei, vid);
+
+        /* 跳过 VLAN tag（4 字节：2 TPID + 2 TCI），读取内层 EtherType */
+        payload += 4;
+        plen -= 4;
+        if (plen < 2) {
+            LOG_WARN("parse_eth: truncated after VLAN tag");
+            return 0;
+        }
+        uint16_t inner_type_raw;
+        memcpy(&inner_type_raw, payload, 2);
+        type = ntohs(inner_type_raw);
+        payload += 2;
+        plen -= 2;
+        tname = ethertype_name(type);
+        printf("ETH :   inner type=0x%04x(%s)\n",
+               type, tname ? tname : "Unknown");
+    }
 
     int rc = 0;
     if (type == ETH_TYPE_IPV4) {
@@ -362,8 +572,7 @@ int parse_eth(const uint8_t *pkt, size_t len)
     } else if (type == ETH_TYPE_IPV6) {
         rc = parse_ipv6(payload, plen);
     } else {
-        /* ARP / VLAN / 其它 EtherType：Day 2 暂不深入。
-         * 后续可在此处补 parse_arp / VLAN tag 剥离。 */
+        /* ARP / 其它 EtherType：暂不深入 */
     }
 
     return rc;
@@ -457,10 +666,25 @@ int parse_udp(const uint8_t *pkt, size_t len)
            src_port, dst_port,
            length, checksum);
 
-    /* Day 4: UDP 端口 53 → DNS 解析 */
-    if ((src_port == DNS_PORT || dst_port == DNS_PORT) && len > UDP_HDR_LEN) {
-        const uint8_t *app = pkt + UDP_HDR_LEN;
-        size_t app_len = len - UDP_HDR_LEN;
+    /* 校验 UDP length 字段：必须 >= 8（首部），且与缓冲区一致 */
+    if (length < UDP_HDR_LEN) {
+        LOG_ERROR("parse_udp: invalid length %u (< header %u)", length, UDP_HDR_LEN);
+        return -1;
+    }
+    if (length > len) {
+        LOG_WARN("parse_udp: length %u > buffer %zu, truncating", length, len);
+        length = (uint16_t)len;
+    }
+
+    /* 应用层载荷 = min(buffer剩余, UDP length - 8) */
+    const uint8_t *app = pkt + UDP_HDR_LEN;
+    size_t app_len = len - UDP_HDR_LEN;
+    size_t udp_plen = (size_t)length - UDP_HDR_LEN;
+    if (udp_plen < app_len)
+        app_len = udp_plen;
+
+    /* UDP 端口 53 → DNS 解析 */
+    if ((src_port == DNS_PORT || dst_port == DNS_PORT) && app_len > 0) {
         parse_dns(app, app_len);
     }
 
@@ -655,6 +879,18 @@ int parse_dns(const uint8_t *pkt, size_t len)
     uint16_t nscount = ntohs(h->nscount);
     uint16_t arcount = ntohs(h->arcount);
 
+    /* 限制计数，防止畸形包导致过度循环 */
+    #define DNS_MAX_COUNT 256
+    if (qdcount > DNS_MAX_COUNT) {
+        LOG_WARN("parse_dns: qdcount=%u capped to %d", qdcount, DNS_MAX_COUNT);
+        qdcount = DNS_MAX_COUNT;
+    }
+    if (ancount > DNS_MAX_COUNT) {
+        LOG_WARN("parse_dns: ancount=%u capped to %d", ancount, DNS_MAX_COUNT);
+        ancount = DNS_MAX_COUNT;
+    }
+    #undef DNS_MAX_COUNT
+
     int is_response = (flags & DNS_FLAG_QR) ? 1 : 0;
     int opcode  = (flags & DNS_FLAG_OPCODE_MASK) >> 11;
     int rcode   = flags & DNS_FLAG_RCODE_MASK;
@@ -698,8 +934,11 @@ int parse_dns(const uint8_t *pkt, size_t len)
         if (remaining < 4)
             break;
 
-        uint16_t qtype  = ntohs(*(const uint16_t *)qpos);
-        uint16_t qclass = ntohs(*(const uint16_t *)(qpos + 2));
+        uint16_t qtype_val, qclass_val;
+        memcpy(&qtype_val, qpos, 2);
+        memcpy(&qclass_val, qpos + 2, 2);
+        uint16_t qtype  = ntohs(qtype_val);
+        uint16_t qclass = ntohs(qclass_val);
         qpos += 4;
         remaining -= 4;
 
@@ -745,10 +984,13 @@ int parse_dns(const uint8_t *pkt, size_t len)
         if (ans_remaining < 10)
             break;
 
-        uint16_t rtype   = ntohs(*(const uint16_t *)rpos);
+        uint16_t rtype_val, rdlength_val;
+        memcpy(&rtype_val, rpos, 2);
+        memcpy(&rdlength_val, rpos + 8, 2);
+        uint16_t rtype   = ntohs(rtype_val);
         /* uint16_t rclass = ntohs(*(const uint16_t *)(rpos + 2)); */
         /* uint32_t ttl    = ntohl(*(const uint32_t *)(rpos + 4)); */
-        uint16_t rdlength = ntohs(*(const uint16_t *)(rpos + 8));
+        uint16_t rdlength = ntohs(rdlength_val);
 
         rpos += 10;
         ans_remaining -= 10;
@@ -871,20 +1113,38 @@ int parse_http(const uint8_t *pkt, size_t len)
         if (n >= 2) {
             const char *desc = NULL;
             switch (status_code) {
-            case 200: desc = "OK";                break;
-            case 201: desc = "Created";           break;
-            case 204: desc = "No Content";        break;
-            case 301: desc = "Moved Permanently"; break;
-            case 302: desc = "Found";             break;
-            case 304: desc = "Not Modified";      break;
-            case 400: desc = "Bad Request";       break;
-            case 401: desc = "Unauthorized";      break;
-            case 403: desc = "Forbidden";         break;
-            case 404: desc = "Not Found";         break;
-            case 405: desc = "Method Not Allowed"; break;
-            case 500: desc = "Internal Server Error"; break;
-            case 502: desc = "Bad Gateway";       break;
-            case 503: desc = "Service Unavailable"; break;
+            /* 1xx Informational */
+            case 100: desc = "Continue";                  break;
+            case 101: desc = "Switching Protocols";       break;
+            /* 2xx Success */
+            case 200: desc = "OK";                        break;
+            case 201: desc = "Created";                   break;
+            case 202: desc = "Accepted";                  break;
+            case 204: desc = "No Content";                break;
+            case 206: desc = "Partial Content";           break;
+            /* 3xx Redirection */
+            case 301: desc = "Moved Permanently";         break;
+            case 302: desc = "Found";                     break;
+            case 303: desc = "See Other";                 break;
+            case 304: desc = "Not Modified";              break;
+            case 307: desc = "Temporary Redirect";        break;
+            case 308: desc = "Permanent Redirect";        break;
+            /* 4xx Client Error */
+            case 400: desc = "Bad Request";               break;
+            case 401: desc = "Unauthorized";              break;
+            case 403: desc = "Forbidden";                 break;
+            case 404: desc = "Not Found";                 break;
+            case 405: desc = "Method Not Allowed";        break;
+            case 408: desc = "Request Timeout";           break;
+            case 409: desc = "Conflict";                  break;
+            case 413: desc = "Payload Too Large";         break;
+            case 429: desc = "Too Many Requests";         break;
+            /* 5xx Server Error */
+            case 500: desc = "Internal Server Error";     break;
+            case 501: desc = "Not Implemented";           break;
+            case 502: desc = "Bad Gateway";               break;
+            case 503: desc = "Service Unavailable";       break;
+            case 504: desc = "Gateway Timeout";           break;
             }
 
             printf("HTTP: Response %s %d", version, status_code);

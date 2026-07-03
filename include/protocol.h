@@ -91,6 +91,30 @@ struct ipv6_hdr {
 
 #define IPV6_VERSION(hdr) (((ntohl((hdr)->ver_tc_fl)) >> 28) & 0x0F)
 
+/* IPv6 扩展头类型 (next_hdr 值) — RFC 8200 §4 */
+#define IPV6_NEXT_HOPOPT   0    /* Hop-by-Hop Options */
+#define IPV6_NEXT_ICMP     1    /* ICMPv4 (极少见) */
+#define IPV6_NEXT_ICMPV6   58   /* ICMPv6 */
+#define IPV6_NEXT_TCP      6
+#define IPV6_NEXT_UDP      17
+#define IPV6_NEXT_ROUTING  43   /* Routing Header */
+#define IPV6_NEXT_FRAGMENT 44   /* Fragment Header */
+#define IPV6_NEXT_AH       51   /* Authentication Header (IPsec) */
+#define IPV6_NEXT_ESP      50   /* Encapsulating Security Payload (IPsec) */
+#define IPV6_NEXT_DSTOPT   60   /* Destination Options */
+#define IPV6_NEXT_NONE     59   /* No next header */
+
+/* IPv6 Fragment Header (44) — RFC 8200 §4.5 */
+struct ipv6_frag_hdr {
+    uint8_t  next_hdr;           /* 后续头类型 */
+    uint8_t  reserved;           /* 保留 */
+    uint16_t frag_off_flags;     /* 高 3 位保留 + 13 位片偏移(8 字节单位) */
+    uint32_t ident;              /* 分片标识 */
+} __attribute__((packed));
+
+/* IPv6 扩展头通用表示（仅 next_hdr + hdr_ext_len，用于跳过扩展头） */
+#define IPV6_EXTHDR_LEN_UNIT 8  /* 扩展头长度单位：8 字节 */
+
 /* ============================================================
  *  TCP — RFC 793
  *  首部最小 20 字节，含 options 后最大 60 字节
