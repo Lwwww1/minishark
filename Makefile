@@ -1,6 +1,6 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -g -Iinclude
-LDFLAGS = -lpcap -lncurses
+LDFLAGS = -lpcap -lncurses -lpthread
 TARGET  = my_sniffer
 
 # 源文件目录
@@ -10,11 +10,11 @@ SRCS    = $(SRCDIR)/main.c \
           $(SRCDIR)/filter.c \
           $(SRCDIR)/protocol.c \
           $(SRCDIR)/stats.c \
-          $(SRCDIR)/pcap_io.c
+          $(SRCDIR)/pcap_io.c \
+          $(SRCDIR)/ring_buffer.c
 OBJS    = $(SRCS:.c=.o)
 
 # 后续模块
-# SRCS += $(SRCDIR)/pcap_io.c $(SRCDIR)/ring_buffer.c
 # SRCS += $(SRCDIR)/tcp_reasm.c $(SRCDIR)/tls_parser.c $(SRCDIR)/ui.c
 
 .PHONY: all clean run
