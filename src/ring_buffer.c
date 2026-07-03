@@ -126,3 +126,50 @@ void rb_pop(ring_buffer_t *rb, struct pcap_pkthdr *header,
     pthread_cond_signal(&rb->not_full);
     pthread_mutex_unlock(&rb->lock);
 }
+
+int rb_pop_timeout(ring_buffer_t *rb, struct pcap_pkthdr *header,
+                   uint8_t *packet, uint32_t *len, int timeout_ms)
+{
+    if (rb == NULL || header == NULL || packet == NULL || len == NULL) return -1;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec  += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&rb->lock);
+
+    while (rb->count <= 0) {
+        int rc = pthread_cond_timedwait(&rb->not_empty, &rb->lock, &ts);
+        if (rc == ETIMEDOUT) {
+            pthread_mutex_unlock(&rb->lock);
+            return 0;
+        }
+    }
+
+    struct rb_slot *slot = &rb->slots[rb->head];
+    *header = slot->header;
+    *len    = slot->data_len;
+    if (*len > MAX_PKT_SIZE) *len = MAX_PKT_SIZE;
+    memcpy(packet, slot->data, *len);
+
+    rb->head = (rb->head + 1) % rb->capacity;
+    rb->count--;
+
+    pthread_cond_signal(&rb->not_full);
+    pthread_mutex_unlock(&rb->lock);
+    return 1;
+}
+
+int rb_count(ring_buffer_t *rb)
+{
+    if (rb == NULL) return 0;
+    pthread_mutex_lock(&rb->lock);
+    int c = rb->count;
+    pthread_mutex_unlock(&rb->lock);
+    return c;
+}

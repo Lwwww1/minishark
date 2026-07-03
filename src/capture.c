@@ -13,6 +13,7 @@
 #include "capture.h"
 #include "filter.h"
 #include "protocol.h"
+#include "ring_buffer.h"
 #include "stats.h"
 
 /* ================================================================
@@ -21,6 +22,7 @@
 
 static pcap_t        *g_handle = NULL;   /* 供 capture_break 访问 */
 static pcap_dumper_t *g_dumper = NULL;   /* -w 输出文件 */
+static ring_buffer_t *g_rb     = NULL;   /* 多线程环形缓冲区 */
 
 /* ================================================================
  *  包分发 → B 同学的 parse_eth()
@@ -70,7 +72,13 @@ static void pcap_callback(u_char *user, const struct pcap_pkthdr *header,
         pcap_dump((u_char *)g_dumper, header, packet);
     }
 
-    dispatch_packet(header, packet);
+    /* 多线程模式：推入环形缓冲区，由 parse 线程消费 */
+    if (g_rb) {
+        rb_push(g_rb, header, packet);
+    } else {
+        /* 单线程模式：直接解析 */
+        dispatch_packet(header, packet);
+    }
 }
 
 /* ================================================================
@@ -165,6 +173,11 @@ void capture_stop(pcap_t *handle)
 void capture_set_dumper(pcap_dumper_t *dumper)
 {
     g_dumper = dumper;
+}
+
+void capture_set_ring_buffer(ring_buffer_t *rb)
+{
+    g_rb = rb;
 }
 
 void capture_break(void)

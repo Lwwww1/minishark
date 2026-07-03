@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
+#include <errno.h>
 #include <pcap.h>
 #include <netinet/in.h>
 #include <net/ethernet.h>
