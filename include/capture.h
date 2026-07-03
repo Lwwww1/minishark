@@ -28,4 +28,7 @@ void capture_break(void);
 /* 包分发函数：从 pcap 回调中解析协议栈 */
 void dispatch_packet(const struct pcap_pkthdr *header, const u_char *packet);
 
+/* 设置 PCAP 输出文件（-w 参数），每个捕获的包自动写入 */
+void capture_set_dumper(pcap_dumper_t *dumper);
+
 #endif /* CAPTURE_H */

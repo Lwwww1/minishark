@@ -9,7 +9,8 @@ SRCS    = $(SRCDIR)/main.c \
           $(SRCDIR)/capture.c \
           $(SRCDIR)/filter.c \
           $(SRCDIR)/protocol.c \
-          $(SRCDIR)/stats.c
+          $(SRCDIR)/stats.c \
+          $(SRCDIR)/pcap_io.c
 OBJS    = $(SRCS:.c=.o)
 
 # 后续模块

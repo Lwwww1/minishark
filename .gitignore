@@ -1,0 +1,10 @@
+# 编译产物
+*.o
+my_sniffer
+
+# 项目文档
+*.md
+!README.md
+
+# 抓包数据文件
+*.pcap
