@@ -905,13 +905,11 @@ int parse_http(const uint8_t *pkt, size_t len)
 
     /* 检查是否以已知方法开头 */
     int is_http = 0;
-    size_t method_len = 0;
     for (int mi = 0; known_methods[mi]; mi++) {
         size_t mlen = strlen(known_methods[mi]);
         if (copy_len > mlen && buf[mlen] == ' ' &&
             strncmp(buf, known_methods[mi], mlen) == 0) {
             is_http = 1;
-            method_len = mlen;
             break;
         }
     }
