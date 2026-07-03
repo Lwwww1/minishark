@@ -6,7 +6,18 @@
  * tcp_reasm.c — TCP 流重组的完整实现
  *
  * 基于 5 元组哈希表的流跟踪、按 SEQ 排序插入、
- * 以及简化 TCP 状态机。
+ * TCP 状态机、重叠段处理（去重/重传/部分覆盖）、
+ * 以及连续数据重组缓冲区。
+ *
+ * == 重叠段处理策略 ==
+ *   - 完全重复 (same SEQ, same/less length)：丢弃，计数器 +1
+ *   - 重传 (same SEQ, longer)：保留已有，追加尾部未覆盖数据
+ *   - 部分重叠 (overlap at edges)：截断新段的覆盖部分，保留新数据
+ *   - 完全覆盖（新段覆盖已有段）：移除已有段，保留新段
+ *
+ * == 连续重组 ==
+ *   tcp_reasm_assemble() 在每次插入后被调用，
+ *   从 segments 链表中取出 SEQ 连续的段，追加到 reasm_buf。
  *
  * 哈希表使用分离链接法 (separate chaining)，每个桶是一个单向链表。
  */
@@ -37,7 +48,7 @@ static struct tcp_stream *g_buckets[REASM_HASH_SIZE];
 
 /* 统计 */
 static int g_stream_count  = 0;   /* 当前活跃流数 */
-static int g_seg_total     = 0;   /* 全局段总数（用于调试/测试） */
+static int g_seg_total     = 0;   /* 全局段总数 */
 static int g_initialized   = 0;   /* 是否已初始化 */
 
 /* ============================================================
@@ -185,8 +196,31 @@ static struct tcp_stream *stream_alloc(const struct tcp_key *key)
     s->server_next_seq = 0;
     s->segments       = NULL;
     s->seg_count      = 0;
+    /* ---- 重组缓冲区懒初始化为 NULL ---- */
+    s->reasm_buf      = NULL;
+    s->reasm_len      = 0;
+    s->reasm_cap      = 0;
+    s->reasm_next_seq = 0;
+    s->reasm_active   = 0;
+    s->dup_count      = 0;
+    s->retrans_count  = 0;
+    s->overlap_count  = 0;
+    s->ooo_count      = 0;
     s->next           = NULL;
     return s;
+}
+
+/*
+ * stream_free_one — 释放单个流及其所有资源
+ */
+static void stream_free_one(struct tcp_stream *stream)
+{
+    if (stream == NULL) return;
+    segment_free_chain(stream->segments);
+    if (stream->reasm_buf != NULL)
+        free(stream->reasm_buf);
+    free(stream);
+    g_stream_count--;
 }
 
 /* ============================================================
@@ -258,14 +292,19 @@ static struct tcp_stream *stream_find_or_create(const struct tcp_key *key)
 }
 
 /* ============================================================
- *  段插入（按 SEQ 排序）
+ *  段插入（按 SEQ 排序 + 重叠处理）
  * ============================================================ */
 
 /*
  * segment_insert_sorted — 将新段按 SEQ 升序插入流中
  *
- * 相同 SEQ 的段会被合并（首个到达者保留）。
- * 返回 0 成功，-1 失败。
+ * 处理各种重叠情况：
+ *   - 完全重复 → 丢弃，返回 TCP_INSERT_DUP
+ *   - 首部重叠 → 截断新段的覆盖部分
+ *   - 完全覆盖已有段 → 移除已有，保留新段
+ *   - 无重叠 → 正常插入
+ *
+ * 返回： 0 成功，-1 失败，-2 完全重复，-3 部分重传
  */
 static int segment_insert_sorted(struct tcp_stream *stream,
                                   uint32_t seq, uint32_t seq_len,
@@ -275,54 +314,146 @@ static int segment_insert_sorted(struct tcp_stream *stream,
     /* 没有载荷则不插入 */
     if (data_len == 0 && !(flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)))
         return 0;
+    if (seq_len == 0)
+        return 0;
 
-    /* 分配新段 */
-    struct tcp_segment *new_seg = segment_alloc(seq, seq_len, data, data_len, flags);
+    /* ---- 局部变量，在遍历中逐步调整 ---- */
+    uint32_t cur_seq     = seq;
+    uint32_t cur_seq_len = seq_len;
+    uint16_t cur_data_len = data_len;
+    const uint8_t *cur_data = data;
+    int result = 0;
+
+    /* ---- 遍历链表，处理重叠 ---- */
+    struct tcp_segment *prev = NULL;
+    struct tcp_segment *curr = stream->segments;
+
+    while (curr != NULL) {
+        uint32_t curr_end = curr->seq + curr->seq_len;
+        uint32_t new_end  = cur_seq + cur_seq_len;
+
+        if (curr_end <= cur_seq) {
+            /* [===curr===] 完全在当前段之前 → 继续前进 */
+            prev = curr;
+            curr = curr->next;
+            continue;
+        }
+
+        if (curr->seq >= new_end) {
+            /* [===new===] 完全在当前段之前 → 无更多重叠 */
+            break;
+        }
+
+        /* ======== 存在重叠 ======== */
+
+        if (curr->seq == cur_seq) {
+            /* 相同起始 SEQ */
+            if (cur_seq_len <= curr->seq_len) {
+                /* 新段完全被已有段覆盖 → 完全重复或更短重传 */
+                stream->dup_count++;
+                return TCP_INSERT_DUP;
+            }
+            /* 新段比已有段长 → 追加尾部未覆盖数据 */
+            uint32_t covered = curr->seq_len;
+            cur_seq     += covered;
+            cur_seq_len -= covered;
+            /* 调整数据指针 */
+            if (cur_data_len > (uint16_t)covered) {
+                cur_data     += (uint16_t)covered;
+                cur_data_len -= (uint16_t)covered;
+            } else {
+                cur_data_len = 0;
+            }
+            /* 移除已完全覆盖的 curr */
+            struct tcp_segment *to_rm = curr;
+            curr = curr->next;
+            if (prev)
+                prev->next = curr;
+            else
+                stream->segments = curr;
+            free(to_rm);
+            g_seg_total--;
+            stream->seg_count--;
+            stream->retrans_count++;
+            result = TCP_INSERT_RETRANSMIT;
+            /* 继续检查下一个段 */
+            continue;
+        }
+
+        if (curr->seq < cur_seq) {
+            /* curr 在新段之前开始 */
+            if (curr_end >= new_end) {
+                /* 新段完全被 curr 覆盖 */
+                stream->dup_count++;
+                return TCP_INSERT_DUP;
+            }
+            /* 新段尾部超出 curr → 截断新段头部 */
+            uint32_t covered = curr_end - cur_seq;
+            cur_seq     += covered;
+            cur_seq_len -= covered;
+            if (cur_data_len > (uint16_t)covered) {
+                cur_data     += (uint16_t)covered;
+                cur_data_len -= (uint16_t)covered;
+            } else {
+                cur_data_len = 0;
+            }
+            result = TCP_INSERT_OVERLAP;
+            /* 前进到 next，继续检查 */
+            prev = curr;
+            curr = curr->next;
+            continue;
+        }
+
+        if (curr->seq > cur_seq) {
+            /* 新段在 curr 之前开始 */
+            if (new_end <= curr_end) {
+                /* 新段结束在 curr 内部 → 截断新段尾部 */
+                cur_seq_len = curr->seq - cur_seq;
+                if (cur_data_len > cur_seq_len)
+                    cur_data_len = (uint16_t)cur_seq_len;
+                result = TCP_INSERT_OVERLAP;
+                break;  /* 无更多重叠 */
+            }
+            /* 新段完全覆盖 curr → 移除 curr */
+            struct tcp_segment *to_rm = curr;
+            curr = curr->next;
+            if (prev)
+                prev->next = curr;
+            else
+                stream->segments = curr;
+            free(to_rm);
+            g_seg_total--;
+            stream->seg_count--;
+            stream->overlap_count++;
+            result = TCP_INSERT_OVERLAP;
+            /* 新段不变，继续检查下一个 */
+            continue;
+        }
+
+        /* 不应到达这里，防御性前进 */
+        prev = curr;
+        curr = curr->next;
+    }
+
+    /* ---- 处理完后无有效数据的情况 ---- */
+    if (cur_seq_len == 0)
+        return result;
+    if (cur_data_len == 0 && !(flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)))
+        return result;
+
+    /* ---- 分配并插入 ---- */
+    uint16_t final_data_len = cur_data_len;
+    if (final_data_len > cur_seq_len)
+        final_data_len = (uint16_t)cur_seq_len;
+
+    struct tcp_segment *new_seg = segment_alloc(cur_seq, cur_seq_len,
+                                                 cur_data, final_data_len,
+                                                 flags);
     if (new_seg == NULL)
         return -1;
 
-    /* 空链表 → 直接作为头 */
-    if (stream->segments == NULL) {
-        stream->segments = new_seg;
-        stream->seg_count++;
-        g_seg_total++;
-        return 0;
-    }
-
-    /*
-     * 链表中已存在相同 SEQ 的段 → 丢弃新段（去重）
-     * 遍历链表检查重复。
-     */
-    struct tcp_segment *prev = NULL;
-    struct tcp_segment *curr = stream->segments;
-    while (curr != NULL) {
-        if (curr->seq == seq) {
-            LOG_WARN("tcp_reasm: duplicate SEQ 0x%08x, dropping", seq);
-            free(new_seg);
-            return 0;
-        }
-        prev = curr;
-        curr = curr->next;
-    }
-
-    /* 找到插入位置（SEQ 升序） */
-    prev = NULL;
-    curr = stream->segments;
-    while (curr != NULL && curr->seq < seq) {
-        prev = curr;
-        curr = curr->next;
-    }
-
-    /* 再次检查重复（在更精确的位置） */
-    if (curr != NULL && curr->seq == seq) {
-        LOG_WARN("tcp_reasm: duplicate SEQ 0x%08x, dropping", seq);
-        free(new_seg);
-        return 0;
-    }
-
-    /* 插入 */
+    /* 插入到 prev 和 curr 之间 */
     if (prev == NULL) {
-        /* 插入到链表头 */
         new_seg->next = stream->segments;
         stream->segments = new_seg;
     } else {
@@ -331,7 +462,111 @@ static int segment_insert_sorted(struct tcp_stream *stream,
     }
     stream->seg_count++;
     g_seg_total++;
+
+    /* 记录是否是乱序（插在非末尾位置 且 链表非空） */
+    if (curr != NULL && stream->seg_count > 1) {
+        stream->ooo_count++;
+    }
+
+    return result;
+}
+
+/* ============================================================
+ *  连续重组
+ * ============================================================ */
+
+/*
+ * reasm_buf_ensure — 确保重组缓冲区至少能容纳 need 字节
+ *
+ * 返回 0 成功，-1 内存不足。
+ */
+static int reasm_buf_ensure(struct tcp_stream *stream, uint32_t need)
+{
+    if (stream->reasm_cap >= need)
+        return 0;
+
+    /* 不超过最大限制 */
+    if (need > REASM_BUF_MAX_SIZE) {
+        LOG_WARN("tcp_reasm: reassembly buffer would exceed max size (%u), truncating",
+                 REASM_BUF_MAX_SIZE);
+        need = REASM_BUF_MAX_SIZE;
+    }
+
+    uint32_t new_cap = stream->reasm_cap == 0
+                           ? REASM_BUF_INIT_SIZE
+                           : stream->reasm_cap;
+    while (new_cap < need) {
+        new_cap *= 2;
+        if (new_cap > REASM_BUF_MAX_SIZE) {
+            new_cap = REASM_BUF_MAX_SIZE;
+            break;
+        }
+    }
+
+    uint8_t *new_buf = realloc(stream->reasm_buf, new_cap);
+    if (new_buf == NULL && new_cap > 0) {
+        LOG_ERROR("tcp_reasm: realloc(%u) failed for reassembly buffer", new_cap);
+        return -1;
+    }
+    stream->reasm_buf = new_buf;
+    stream->reasm_cap = new_cap;
     return 0;
+}
+
+uint32_t tcp_reasm_assemble(struct tcp_stream *stream)
+{
+    if (stream == NULL || stream->segments == NULL)
+        return 0;
+
+    /* 如果重组未初始化，使用第一个段的首 SEQ 初始化 */
+    if (!stream->reasm_active && stream->segments != NULL) {
+        /* 跳过 SYN 段 */
+        struct tcp_segment *first = stream->segments;
+        if (first->flags & TCP_FLAG_SYN) {
+            /* SYN 仅消耗 seq_len=1，无实质数据 */
+            stream->reasm_next_seq = first->seq + first->seq_len;
+            stream->reasm_active = 1;
+            /* 移除 SYN 段 */
+            stream->segments = first->next;
+            free(first);
+            g_seg_total--;
+            stream->seg_count--;
+        } else {
+            stream->reasm_next_seq = first->seq;
+            stream->reasm_active = 1;
+        }
+    }
+
+    uint32_t total_appended = 0;
+
+    while (stream->segments != NULL) {
+        struct tcp_segment *seg = stream->segments;
+
+        /* 检查是否连续 */
+        if (seg->seq != stream->reasm_next_seq)
+            break;
+
+        /* 只拷贝实际载荷数据（SYN/FIN 占用序列号空间但不产生数据） */
+        uint32_t data_to_copy = seg->data_len;
+        if (data_to_copy > 0) {
+            if (reasm_buf_ensure(stream, stream->reasm_len + data_to_copy) != 0)
+                break;
+            memcpy(stream->reasm_buf + stream->reasm_len, seg->data, data_to_copy);
+            stream->reasm_len += data_to_copy;
+            total_appended += data_to_copy;
+        }
+
+        /* 推进期望序列号（跳过整个 SEQ 空间，含 SYN/FIN） */
+        stream->reasm_next_seq = seg->seq + seg->seq_len;
+
+        /* 移除已处理的段 */
+        stream->segments = seg->next;
+        free(seg);
+        g_seg_total--;
+        stream->seg_count--;
+    }
+
+    return total_appended;
 }
 
 /* ============================================================
@@ -582,9 +817,7 @@ void tcp_reasm_destroy(void)
         struct tcp_stream *s = g_buckets[i];
         while (s != NULL) {
             struct tcp_stream *next = s->next;
-            segment_free_chain(s->segments);
-            free(s);
-            g_stream_count--;
+            stream_free_one(s);
             s = next;
         }
         g_buckets[i] = NULL;
@@ -716,7 +949,6 @@ int tcp_reasm_insert(const uint8_t *pkt, size_t len)
         if (key_equal(&swapped, &info.key)) {
             is_from_client = 0;  /* 服务端→客户端 */
         } else {
-            /* 理论上不应到达这里（stream_find_or_create 会处理方向） */
             LOG_WARN("tcp_reasm: packet direction mismatch, treating as client");
             is_from_client = 1;
         }
@@ -725,14 +957,12 @@ int tcp_reasm_insert(const uint8_t *pkt, size_t len)
     /* === 5. 运行状态机 === */
     tcp_state_machine(stream, info.flags, info.seq, info.ack, is_from_client);
 
-    /* === 6. 插入载荷段 === */
+    /* === 6. 插入载荷段（含重叠处理） === */
+    int insert_result = 0;
     if (info.payload_len > 0 || (info.flags & (TCP_FLAG_SYN | TCP_FLAG_FIN))) {
-        /* 计算该段在数据流中的 SEQ 长度：
-         * SYN 和 FIN 各占 1 字节序列号空间 (RFC 793) */
+        /* 计算该段在数据流中的 SEQ 长度 */
         uint32_t seq_len = info.payload_len;
         if (info.flags & TCP_FLAG_SYN) seq_len++;
-        /* FIN 的 seq 长度只有在状态机处理后才确定，这里简单加 1 */
-        /* 实际上 FIN 占 1 字节序列号，如果既有 SYN 又有 FIN 则分别加 */
         if (info.flags & TCP_FLAG_FIN) seq_len++;
 
         const uint8_t *payload_data = NULL;
@@ -742,11 +972,11 @@ int tcp_reasm_insert(const uint8_t *pkt, size_t len)
             data_len = info.payload_len;
         }
 
-        segment_insert_sorted(stream, info.seq, seq_len,
-                               payload_data, data_len, info.flags);
+        insert_result = segment_insert_sorted(stream, info.seq, seq_len,
+                                               payload_data, data_len, info.flags);
     }
 
-    return 0;
+    return insert_result;
 }
 
 void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
@@ -782,11 +1012,10 @@ void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
             /* 服务端 SYN+ACK */
             stream->server_isn = seq;
             stream->server_next_seq = seq + 1;
-            /* 客户端 ACK 确认了服务端的 SYN */
             stream->state = TCP_STATE_ESTABLISHED;
             LOG_INFO("tcp_reasm: SYN+ACK (ISN=0x%08x), SYN_RCVD -> ESTABLISHED", seq);
         } else if (flags & TCP_FLAG_SYN && is_from_client) {
-            /* 重传的 SYN，更新 ISN（如果不同） */
+            /* 重传的 SYN */
             stream->client_isn = seq;
             stream->client_next_seq = seq + 1;
             LOG_INFO("tcp_reasm: retransmit SYN (ISN=0x%08x)", seq);
@@ -817,12 +1046,45 @@ void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
 
     case TCP_STATE_CLOSING:
         /* 可以在这里实现 TIME_WAIT 逻辑（留待日后扩展） */
-        /* 两个方向都已关闭，可以清理 */
         break;
 
     default:
         break;
     }
+}
+
+const uint8_t *tcp_reasm_get_data(struct tcp_stream *stream, uint32_t *len)
+{
+    if (stream == NULL || len == NULL) {
+        if (len) *len = 0;
+        return NULL;
+    }
+
+    /* 先尝试组装更多数据 */
+    tcp_reasm_assemble(stream);
+
+    *len = stream->reasm_len;
+    if (stream->reasm_len == 0 || stream->reasm_buf == NULL)
+        return NULL;
+
+    return stream->reasm_buf;
+}
+
+void tcp_reasm_get_stream_stats(struct tcp_stream *stream,
+                                uint32_t *dup, uint32_t *retrans,
+                                uint32_t *overlap, uint32_t *ooo)
+{
+    if (stream == NULL) {
+        if (dup)     *dup     = 0;
+        if (retrans) *retrans = 0;
+        if (overlap) *overlap = 0;
+        if (ooo)     *ooo     = 0;
+        return;
+    }
+    if (dup)     *dup     = stream->dup_count;
+    if (retrans) *retrans = stream->retrans_count;
+    if (overlap) *overlap = stream->overlap_count;
+    if (ooo)     *ooo     = stream->ooo_count;
 }
 
 int tcp_reasm_stream_count(void)

@@ -991,6 +991,333 @@ static void test_destroy_with_segments(void)
 }
 
 /* ============================================================
+ *  重叠段 / 重传处理测试
+ * ============================================================ */
+
+static void test_overlap_exact_dup(void)
+{
+    test_begin("overlap: exact duplicate (same SEQ, same len)");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1100, "Hello") */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1100, 5001,
+                    (const uint8_t *)"Hello", 5);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert exact duplicate DATA(1100, "Hello") */
+    int r = tcp_reasm_insert(pkt, pktlen);
+    test_end_int_eq(r, TCP_INSERT_DUP, "dup returns TCP_INSERT_DUP");
+
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+    if (s) {
+        uint32_t dup, retrans, overlap, ooo;
+        tcp_reasm_get_stream_stats(s, &dup, &retrans, &overlap, &ooo);
+        test_end_int_eq((int)dup, 1, "dup_count = 1");
+    }
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+static void test_overlap_retransmit_shorter(void)
+{
+    test_begin("overlap: retransmit shorter (same SEQ, shorter data)");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1100, "HelloWorld") — 10 bytes */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1100, 5001,
+                    (const uint8_t *)"HelloWorld", 10);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Retransmit shorter: DATA(1100, "Hello") — 5 bytes (should be DUP) */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1100, 5001,
+                    (const uint8_t *)"Hello", 5);
+    int r = tcp_reasm_insert(pkt, pktlen);
+    test_end_int_eq(r, TCP_INSERT_DUP, "shorter retransmit returns DUP");
+
+    /* Check original data preserved */
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+    if (s && s->segments) {
+        test_end_int_eq((int)s->segments->data_len, 10, "original 10 bytes preserved");
+    }
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+static void test_overlap_retransmit_longer(void)
+{
+    test_begin("overlap: retransmit longer (same SEQ, longer data)");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1100, "Hello") — 5 bytes */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1100, 5001,
+                    (const uint8_t *)"Hello", 5);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Retransmit longer: DATA(1100, "HelloWorld") — 10 bytes
+     * Should keep first 5, append last 5 */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1100, 5001,
+                    (const uint8_t *)"HelloWorld", 10);
+    int r = tcp_reasm_insert(pkt, pktlen);
+    test_end_int_eq(r, TCP_INSERT_RETRANSMIT, "longer retransmit returns RETRANSMIT");
+
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+    if (s) {
+        /* The original segment was removed, and a new segment with the tail appended */
+        /* After retransmit handling, we expect 1 segment covering bytes 1100-1109 */
+        int found = 0;
+        struct tcp_segment *seg = s->segments;
+        while (seg) {
+            if (seg->seq == 1100) { /* was retransmitted as 1105 with 5 bytes */
+                found = 1;
+                break;
+            }
+            seg = seg->next;
+        }
+        /* The retransmit longer case: original (1100, len=5) removed.
+         * Tail segment inserted at seq=1105 with "World" (len=5) */
+        test_end_int_eq(found, 1, "tail segment present at seq=1100");
+    }
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+static void test_overlap_partial_front(void)
+{
+    test_begin("overlap: new segment partially overlaps front of existing");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    /* handshake */
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1050, "World") — 5 bytes (covers 1050-1054) */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1050, 5001,
+                    (const uint8_t *)"World", 5);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1048, "HelloWorld") — 10 bytes (covers 1048-1057)
+     * Overlaps with existing: bytes 1050-1054 are overlap.
+     * After trimming: new should cover 1048-1049 (2 bytes) */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1048, 5001,
+                    (const uint8_t *)"HelloWorld", 10);
+    int r = tcp_reasm_insert(pkt, pktlen);
+    test_end_int_eq(r, TCP_INSERT_OVERLAP, "partial front overlap returns OVERLAP");
+
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+    if (s) {
+        /* Should have 3 segments: SYN, SYN+ACK, and two data segments
+         * Segments sorted: SYN(1000), SYN+ACK(5000), DATA(1048,2), DATA(1050,5) */
+        test_end_int_eq(s->seg_count, 4, "4 segments total");
+    }
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+static void test_overlap_cover_existing(void)
+{
+    test_begin("overlap: new segment covers existing entirely");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1060, "AAAA") — 4 bytes */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1060, 5001,
+                    (const uint8_t *)"AAAA", 4);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1055, "BBBBBBBBBB") — 10 bytes (covers 1055-1064)
+     * Completely covers the existing segment (1060-1063).
+     * Existing 1060-1063 should be removed.
+     * New segment should be inserted at 1055 with 10 bytes. */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1055, 5001,
+                    (const uint8_t *)"BBBBBBBBBB", 10);
+    int r = tcp_reasm_insert(pkt, pktlen);
+    test_end_int_eq(r, TCP_INSERT_OVERLAP, "cover existing returns OVERLAP");
+
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+    if (s) {
+        /* Should have: SYN, SYN+ACK, DATA(1055,10) = 3 segments */
+        test_end_int_eq(s->seg_count, 3, "3 segments after covering");
+        if (s->segments) {
+            struct tcp_segment *last = s->segments;
+            while (last->next) last = last->next;
+            test_end_int_eq((int)last->data_len, 10, "covering segment has 10 bytes");
+        }
+    }
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+/* ============================================================
+ *  重组缓冲区测试
+ * ============================================================ */
+
+static void test_reasm_contiguous(void)
+{
+    test_begin("reasm: contiguous data assembly");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    /* handshake */
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_ack_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1001, 5001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert DATA(1001, "ABC") — 3 bytes, then DATA(1004, "DEF") — 3 bytes, contiguous */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1001, 5001,
+                    (const uint8_t *)"ABC", 3);
+    tcp_reasm_insert(pkt, pktlen);
+
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1004, 5001,
+                    (const uint8_t *)"DEF", 3);
+    tcp_reasm_insert(pkt, pktlen);
+
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+
+    /* Get reassembled data */
+    uint32_t data_len = 0;
+    const uint8_t *data = tcp_reasm_get_data(s, &data_len);
+    /* After get_data: first 2 DATA segments should be assembled.
+     * The handshake SYN+ACK stays in segments (seq gap 1001 vs 5000).
+     * Actually wait: after assembly, the contiguous prefix DATA(1001,3) and
+     * DATA(1004,3) will be assembled. But SYN and SYN+ACK are also in the
+     * list. SYN is consumed during initialization. SYN+ACK at seq=5000
+     * does NOT match reasm_next_seq (which is 1007), so it stays. */
+
+    if (data && data_len > 0) {
+        test_end_int_eq((int)data_len, 6, "reassembled 6 bytes");
+        test_end(memcmp(data, "ABCDEF", 6), "content matches 'ABCDEF'");
+    } else {
+        test_end(1, "get_data returned some data");
+    }
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+static void test_reasm_out_of_order(void)
+{
+    test_begin("reasm: out-of-order segments with gap filling");
+    uint8_t pkt[PKT_BUF_SIZE];
+    size_t pktlen;
+
+    capture_output();
+    tcp_reasm_init();
+
+    build_syn_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1000, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_synack_pkt(pkt, &pktlen, 0xC0A80002, 0xC0A80001, 80, 12345, 5000, 1001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+    build_ack_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1001, 5001, NULL, 0);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Insert out-of-order: first later data, then earlier data */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1010, 5001,
+                    (const uint8_t *)"BBB", 3);
+    tcp_reasm_insert(pkt, pktlen);
+
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1007, 5001,
+                    (const uint8_t *)"AAA", 3);
+    tcp_reasm_insert(pkt, pktlen);
+
+    struct tcp_key key;
+    tcp_reasm_extract_key(pkt, pktlen, &key);
+    struct tcp_stream *s = tcp_reasm_get_stream(&key);
+
+    /* No contiguous data yet (gap at 1001-1006) */
+    uint32_t data_len = 0;
+    const uint8_t *data = tcp_reasm_get_data(s, &data_len);
+    test_end_int_eq((int)data_len, 0, "no data yet (gap at 1001-1006)");
+
+    /* Fill the initial gap: DATA(1001, "CCC", 3b) */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1001, 5001,
+                    (const uint8_t *)"CCC", 3);
+    tcp_reasm_insert(pkt, pktlen);
+
+    /* Now have 1001-1003 contiguous, but gap at 1004-1006 */
+    data = tcp_reasm_get_data(s, &data_len);
+    test_end_int_eq((int)data_len, 3, "got 3 bytes after filling initial gap");
+    if (data && data_len >= 3)
+        test_end(memcmp(data, "CCC", 3), "content matches 'CCC'");
+
+    /* Fill middle gap: DATA(1004, "DDD", 3b). Now 1001-1012 contiguous (12 bytes) */
+    build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1004, 5001,
+                    (const uint8_t *)"DDD", 3);
+    tcp_reasm_insert(pkt, pktlen);
+
+    data = tcp_reasm_get_data(s, &data_len);
+    test_end_int_eq((int)data_len, 12, "got 12 bytes after filling all gaps");
+    if (data && data_len >= 12)
+        test_end(memcmp(data, "CCCDDDAAABBB", 12), "content matches 'CCCDDDAAABBB'");
+
+    tcp_reasm_destroy();
+    restore_output();
+}
+
+/* ============================================================
  *  主测试入口
  * ============================================================ */
 
@@ -1043,6 +1370,21 @@ int main(void)
     test_insert_non_ip();
     test_multiple_stream_same_hash();
     test_destroy_with_segments();
+    printf("\n");
+
+    /* ---- 重叠/重传处理 ---- */
+    printf("--- Overlap / Retransmit ---\n");
+    test_overlap_exact_dup();
+    test_overlap_retransmit_shorter();
+    test_overlap_retransmit_longer();
+    test_overlap_partial_front();
+    test_overlap_cover_existing();
+    printf("\n");
+
+    /* ---- 重组缓冲区 ---- */
+    printf("--- Reassembly Buffer ---\n");
+    test_reasm_contiguous();
+    test_reasm_out_of_order();
     printf("\n");
 
     /* ---- 摘要 ---- */
