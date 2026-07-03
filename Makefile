@@ -12,24 +12,26 @@ SRCS    = $(SRCDIR)/main.c \
           $(SRCDIR)/protocol.c \
           $(SRCDIR)/stats.c \
           $(SRCDIR)/pcap_io.c \
-          $(SRCDIR)/ring_buffer.c
+          $(SRCDIR)/ring_buffer.c \
+          $(SRCDIR)/tcp_reasm.c
 OBJS    = $(SRCS:.c=.o)
 
 # 测试源文件
 TESTDIR = tests
-TEST_SRCS = $(TESTDIR)/test_protocol.c $(SRCDIR)/protocol.c
+TEST_SRCS      = $(TESTDIR)/test_protocol.c $(SRCDIR)/protocol.c
+TEST_REASM_SRC = $(TESTDIR)/test_tcp_reasm.c $(SRCDIR)/tcp_reasm.c
 
 # 后续模块
-# SRCS += $(SRCDIR)/tcp_reasm.c $(SRCDIR)/tls_parser.c $(SRCDIR)/ui.c
+# SRCS += $(SRCDIR)/tls_parser.c $(SRCDIR)/ui.c
 
-.PHONY: all clean run test test-verbose
+.PHONY: all clean run test test-verbose test-reasm test-reasm-verbose
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(SRCDIR)/%.o: $(SRCDIR)/%.c include/common.h include/protocol.h
+$(SRCDIR)/%.o: $(SRCDIR)/%.c include/common.h include/protocol.h include/tcp_reasm.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # 协议解析测试（不需要 pcap/ncurses）
@@ -42,6 +44,19 @@ test: $(TESTDIR)/$(TEST_TARGET)
 test-verbose: $(TESTDIR)/$(TEST_TARGET)
 	$(CC) $(CFLAGS) -DVERBOSE -o $(TESTDIR)/$(TEST_TARGET) $(TEST_SRCS)
 	./$(TESTDIR)/$(TEST_TARGET)
+
+# TCP 重组测试
+TEST_REASM_TARGET = test_tcp_reasm
+
+$(TESTDIR)/$(TEST_REASM_TARGET): $(TEST_REASM_SRC) include/tcp_reasm.h include/protocol.h include/common.h
+	$(CC) $(CFLAGS) -o $@ $(TEST_REASM_SRC)
+
+test-reasm: $(TESTDIR)/$(TEST_REASM_TARGET)
+	./$(TESTDIR)/$(TEST_REASM_TARGET)
+
+test-reasm-verbose: $(TESTDIR)/$(TEST_REASM_TARGET)
+	$(CC) $(CFLAGS) -DVERBOSE -o $(TESTDIR)/$(TEST_REASM_TARGET) $(TEST_REASM_SRC)
+	./$(TESTDIR)/$(TEST_REASM_TARGET)
 
 clean:
 	rm -f $(TARGET) $(SRCDIR)/*.o
