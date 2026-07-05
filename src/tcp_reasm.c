@@ -129,8 +129,8 @@ static int key_equal(const struct tcp_key *a, const struct tcp_key *b)
 static void key_swap(struct tcp_key *out, const struct tcp_key *in)
 {
     out->af       = in->af;
-    out->src      = in->dst;   /* 交换地址 */
-    out->dst      = in->src;
+    memcpy(&out->src, &in->dst, sizeof(out->src));  /* 交换地址 */
+    memcpy(&out->dst, &in->src, sizeof(out->dst));
     out->src_port = in->dst_port;  /* 交换端口 */
     out->dst_port = in->src_port;
     out->proto    = in->proto;
@@ -982,6 +982,8 @@ int tcp_reasm_insert(const uint8_t *pkt, size_t len)
 void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
                        uint32_t seq, uint32_t ack, int is_from_client)
 {
+    (void)ack;  /* 保留参数，后续状态机扩展时使用 */
+
     if (stream == NULL)
         return;
 
