@@ -191,10 +191,18 @@ static int parse_header_line(const uint8_t *line, size_t line_len,
     p = value + strlen(value) - 1;
     while (p >= value && (*p == '\r' || *p == '\n')) *p-- = '\0';
 
-    strncpy(msg->headers[msg->header_count].name, name,
-            HTTP_MAX_HEADER_LEN - 1);
-    strncpy(msg->headers[msg->header_count].value, value,
-            HTTP_MAX_HEADER_LEN - 1);
+    {
+        size_t n = strlen(name);
+        if (n >= HTTP_MAX_HEADER_LEN) n = HTTP_MAX_HEADER_LEN - 1;
+        memcpy(msg->headers[msg->header_count].name, name, n);
+        msg->headers[msg->header_count].name[n] = '\0';
+    }
+    {
+        size_t n = strlen(value);
+        if (n >= HTTP_MAX_HEADER_LEN) n = HTTP_MAX_HEADER_LEN - 1;
+        memcpy(msg->headers[msg->header_count].value, value, n);
+        msg->headers[msg->header_count].value[n] = '\0';
+    }
     msg->header_count++;
 
     return 0;

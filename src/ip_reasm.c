@@ -341,7 +341,7 @@ static int frag_do_reassemble(struct ip_frag_stream *fs,
                                uint8_t **out_buf, uint16_t *out_len)
 {
     /* 计算总数据长度 */
-    uint16_t total_data = 0;
+    uint32_t total_data = 0;
     struct ip_frag *f = fs->fragments;
     while (f != NULL) {
         total_data += f->data_len;
@@ -353,7 +353,7 @@ static int frag_do_reassemble(struct ip_frag_stream *fs,
         return -1;
     }
 
-    uint16_t total_pkt_len = fs->ip_hdr_len + total_data;
+    uint32_t total_pkt_len = fs->ip_hdr_len + total_data;
     if (total_pkt_len > IP_REASM_MAX_SIZE) {
         LOG_ERROR("ip_reasm: reassembled packet too large %u", total_pkt_len);
         return -1;
@@ -423,7 +423,7 @@ static int frag_do_reassemble(struct ip_frag_stream *fs,
 static int extract_ipv4_frag(const uint8_t *pkt, size_t len,
                               struct ip_frag_key *key,
                               uint16_t *offset, uint16_t *data_len,
-                              uint8_t **mf, const uint8_t **frag_data,
+                              uint8_t *mf, const uint8_t **frag_data,
                               const uint8_t **ip_hdr, uint8_t *ip_hdr_len)
 {
     if (len < sizeof(struct ipv4_hdr) + sizeof(struct eth_hdr))
@@ -482,7 +482,7 @@ static int extract_ipv4_frag(const uint8_t *pkt, size_t len,
 static int extract_ipv6_frag(const uint8_t *pkt, size_t len,
                               struct ip_frag_key *key,
                               uint16_t *offset, uint16_t *data_len,
-                              uint8_t **mf, const uint8_t **frag_data,
+                              uint8_t *mf, const uint8_t **frag_data,
                               const uint8_t **ip_hdr, uint8_t *ip_hdr_len)
 {
     if (len < sizeof(struct ipv6_hdr) + sizeof(struct eth_hdr))
@@ -538,7 +538,7 @@ static int extract_ipv6_frag(const uint8_t *pkt, size_t len,
             memcpy(&raw, l4 + 2, 2);
             uint16_t frag_flags = ntohs(raw);
             *offset = (frag_flags & 0xFFF8);  /* 13 bits, 8-byte units → bytes */
-            *mf     = (frag_flags & 0x0001) ? &(uint8_t){1} : &(uint8_t){0};
+            *mf     = (frag_flags & 0x0001) ? 1 : 0;
             uint32_t ident_raw;
             memcpy(&ident_raw, l4 + 4, 4);
             key->ident = ntohl(ident_raw);
