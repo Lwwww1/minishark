@@ -26,7 +26,9 @@ static struct proto_stats g_stats[STAT_COUNT] = {
     [STAT_OTHER]  = { .name = "Other" },
 };
 
-static time_t g_last_print = 0;
+static time_t   g_last_print = 0;
+static time_t   g_start_time = 0;
+static uint64_t g_total_pkts = 0;
 
 /* ================================================================
  *  内部分类：根据原始包快速判断协议
@@ -147,6 +149,11 @@ void stats_update(const uint8_t *packet, uint32_t len)
     stat_proto_t p = classify(packet, len);
     g_stats[p].pkt_count++;
     g_stats[p].byte_count += len;
+    g_total_pkts++;
+
+    /* 记录起始时间 */
+    if (g_start_time == 0)
+        g_start_time = time(NULL);
 
     /* 每秒刷新：由 dispatch_packet 驱动，有包才检查 */
     time_t now = time(NULL);
@@ -175,8 +182,20 @@ void stats_print(void)
     }
 
     printf("--------------------------------------------------\n");
-    printf("  %-8s %12lu %15lu\n", "Total",
-           (unsigned long)total_pkts, (unsigned long)total_bytes);
+
+    /* 实时速率 */
+    if (g_start_time > 0) {
+        time_t elapsed = time(NULL) - g_start_time;
+        if (elapsed < 1) elapsed = 1;
+        unsigned long pps = (unsigned long)(g_total_pkts / (uint64_t)elapsed);
+        unsigned long bps = (unsigned long)(total_bytes / (uint64_t)elapsed);
+        printf("  %-8s %12lu %15lu  %lu pkt/s, %lu B/s\n", "Total",
+               (unsigned long)total_pkts, (unsigned long)total_bytes,
+               pps, bps);
+    } else {
+        printf("  %-8s %12lu %15lu\n", "Total",
+               (unsigned long)total_pkts, (unsigned long)total_bytes);
+    }
     printf("--------------------------------------------------\n\n");
 }
 

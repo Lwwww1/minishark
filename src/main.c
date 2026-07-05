@@ -171,6 +171,9 @@ int main(int argc, char *argv[])
     pthread_join(capture_thread, NULL);
     pthread_join(parse_thread, NULL);
 
+    /* 性能统计 */
+    capture_print_stats(handle);
+
     /* 清理 */
     capture_stop(handle);
     if (dumper) pcap_write_close(dumper);
