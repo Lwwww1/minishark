@@ -37,4 +37,10 @@ void capture_set_dumper(pcap_dumper_t *dumper);
 /* 设置环形缓冲区（多线程模式），回调中 push 包到 buffer 而非直接解析 */
 void capture_set_ring_buffer(ring_buffer_t *rb);
 
+/* 返回已捕获包总数 */
+uint64_t capture_get_count(void);
+
+/* 打印内核丢包统计（pcap_stats） */
+void capture_print_stats(pcap_t *handle);
+
 #endif /* CAPTURE_H */

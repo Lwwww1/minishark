@@ -20,9 +20,10 @@
  *  内部状态
  * ================================================================ */
 
-static pcap_t        *g_handle = NULL;   /* 供 capture_break 访问 */
-static pcap_dumper_t *g_dumper = NULL;   /* -w 输出文件 */
-static ring_buffer_t *g_rb     = NULL;   /* 多线程环形缓冲区 */
+static pcap_t        *g_handle   = NULL;   /* 供 capture_break 访问 */
+static pcap_dumper_t *g_dumper   = NULL;   /* -w 输出文件 */
+static ring_buffer_t *g_rb       = NULL;   /* 多线程环形缓冲区 */
+static uint64_t       g_pkt_cnt  = 0;      /* 已捕获包计数 */
 
 /* ================================================================
  *  包分发 → B 同学的 parse_eth()
@@ -48,6 +49,9 @@ void dispatch_packet(const struct pcap_pkthdr *header, const u_char *packet)
 
     /* 流量统计（放在包末尾，不打断解析输出） */
     stats_update(packet, header->len);
+
+    /* 立即刷新，避免 stdout 缓冲造成输出延迟堆积 */
+    fflush(stdout);
 }
 
 /* ================================================================
@@ -58,6 +62,8 @@ static void pcap_callback(u_char *user, const struct pcap_pkthdr *header,
                           const u_char *packet)
 {
     (void)user;
+
+    g_pkt_cnt++;
 
     /* 若指定了 -w，每个包自动写入 pcap 文件 */
     if (g_dumper) {
@@ -116,6 +122,20 @@ pcap_t *capture_init(const char *iface, const char *filter_expr)
     }
     LOG_INFO("datalink type: EN10MB (Ethernet)");
 
+    /* 增大内核套接字接收缓冲区（减少 kernel drops） */
+    {
+        int fd = pcap_get_selectable_fd(handle);
+        if (fd >= 0) {
+            int optval = 256 * 1024 * 1024;
+            if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
+                           &optval, sizeof(optval)) == 0) {
+                LOG_INFO("kernel socket buffer set to 256 MB");
+            } else {
+                LOG_INFO("setsockopt SO_RCVBUF failed (using system default)");
+            }
+        }
+    }
+
     /* BPF 过滤 */
     if (filter_compile(handle, filter_expr, iface) != 0) {
         LOG_ERROR("filter setup failed");
@@ -170,6 +190,35 @@ void capture_set_dumper(pcap_dumper_t *dumper)
 void capture_set_ring_buffer(ring_buffer_t *rb)
 {
     g_rb = rb;
+}
+
+uint64_t capture_get_count(void)
+{
+    return g_pkt_cnt;
+}
+
+void capture_print_stats(pcap_t *handle)
+{
+    if (handle == NULL) return;
+
+    struct pcap_stat ps;
+    if (pcap_stats(handle, &ps) == 0) {
+        uint64_t drop_rate = 0;
+        if (ps.ps_recv > 0) {
+            drop_rate = (uint64_t)ps.ps_drop * 10000 / ps.ps_recv;
+        }
+        LOG_INFO("=== Capture Statistics ===");
+        LOG_INFO("  packets received : %u", ps.ps_recv);
+        LOG_INFO("  packets dropped  : %u (kernel)", ps.ps_drop);
+        LOG_INFO("  interface drops  : %u", ps.ps_ifdrop);
+        LOG_INFO("  drop rate        : %lu.%02lu%%",
+                 (unsigned long)(drop_rate / 100),
+                 (unsigned long)(drop_rate % 100));
+        LOG_INFO("  ring buffer      : %lu packets processed",
+                 (unsigned long)g_pkt_cnt);
+    } else {
+        LOG_ERROR("pcap_stats failed: %s", pcap_geterr(handle));
+    }
 }
 
 void capture_break(void)
