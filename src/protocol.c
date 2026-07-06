@@ -607,6 +607,10 @@ int parse_tcp(const uint8_t *pkt, size_t len)
         LOG_ERROR("parse_tcp: bad data offset %zu", hdr_len);
         return -1;
     }
+    if (len < hdr_len) {
+        LOG_ERROR("parse_tcp: header (hdr_len=%zu) exceeds buffer (len=%zu)", hdr_len, len);
+        return -1;
+    }
 
     uint16_t src_port = ntohs(h->src_port);
     uint16_t dst_port = ntohs(h->dst_port);
