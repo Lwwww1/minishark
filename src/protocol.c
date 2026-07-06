@@ -1,5 +1,6 @@
 #include "protocol.h"
 #include "common.h"
+#include "tls_parser.h"
 
 /*
  * protocol.c — 协议解析实现
@@ -627,13 +628,22 @@ int parse_tcp(const uint8_t *pkt, size_t len)
            seq, ack, flags,
            window, checksum, urgent, hdr_len);
 
-    /* Day 4: TCP 端口 80/8080 → HTTP 解析 */
-    if ((src_port == HTTP_PORT || dst_port == HTTP_PORT ||
-         src_port == HTTP_PORT_ALT || dst_port == HTTP_PORT_ALT)
-        && len > hdr_len) {
+    /* 应用层载荷（TCP 头部之后的数据） */
+    if (len > hdr_len) {
         const uint8_t *app = pkt + hdr_len;
         size_t app_len = len - hdr_len;
-        parse_http(app, app_len);
+
+        /* Day 8: TCP 端口 443 → TLS 解析 */
+        if ((src_port == TLS_PORT || dst_port == TLS_PORT) && app_len > 0) {
+            parse_tls(app, app_len);
+        }
+
+        /* Day 4: TCP 端口 80/8080 → HTTP 解析 */
+        if ((src_port == HTTP_PORT || dst_port == HTTP_PORT ||
+             src_port == HTTP_PORT_ALT || dst_port == HTTP_PORT_ALT)
+            && app_len > 0) {
+            parse_http(app, app_len);
+        }
     }
 
     return 0;

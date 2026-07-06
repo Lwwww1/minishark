@@ -239,6 +239,7 @@ struct dns_hdr {
 
 #define HTTP_PORT    80
 #define HTTP_PORT_ALT 8080
+#define TLS_PORT     443
 
 /* ============================================================
  *                 协议解析函数声明
@@ -255,5 +256,6 @@ int parse_udp (const uint8_t *pkt, size_t len);
 int parse_icmp(const uint8_t *pkt, size_t len, int is_ipv6);
 int parse_dns (const uint8_t *pkt, size_t len);
 int parse_http(const uint8_t *pkt, size_t len);
+int parse_tls (const uint8_t *pkt, size_t len);
 
 #endif /* PROTOCOL_H */
