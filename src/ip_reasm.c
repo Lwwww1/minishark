@@ -426,7 +426,7 @@ static int extract_ipv4_frag(const uint8_t *pkt, size_t len,
                               uint8_t *mf, const uint8_t **frag_data,
                               const uint8_t **ip_hdr, uint8_t *ip_hdr_len)
 {
-    if (len < sizeof(struct ipv4_hdr) + sizeof(struct eth_hdr))
+    if (len < sizeof(struct ipv4_hdr))
         return -1;
 
     const struct ipv4_hdr *ip = (const struct ipv4_hdr *)pkt;
@@ -437,7 +437,7 @@ static int extract_ipv4_frag(const uint8_t *pkt, size_t len,
     size_t ihl = IPV4_IHL(ip);
     if (ihl < 20 || ihl > 60)
         return -1;
-    if (len < ihl + sizeof(struct eth_hdr))
+    if (len < ihl)
         return -1;
 
     uint16_t frag_off_ntoh = ntohs(ip->frag_off);

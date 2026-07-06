@@ -61,6 +61,32 @@ static void test_end_nonzero(int result, const char *name)
     }
 }
 
+static void test_end_nonnull(const void *ptr, const char *name)
+{
+    if (ptr != NULL) {
+        tests_passed++;
+#ifdef VERBOSE
+        printf("  PASS: %s (non-NULL)\n", name);
+#endif
+    } else {
+        tests_failed++;
+        printf("  FAIL: %s (unexpected NULL)\n", name);
+    }
+}
+
+static void test_end_null(const void *ptr, const char *name)
+{
+    if (ptr == NULL) {
+        tests_passed++;
+#ifdef VERBOSE
+        printf("  PASS: %s (NULL as expected)\n", name);
+#endif
+    } else {
+        tests_failed++;
+        printf("  FAIL: %s (expected NULL)\n", name);
+    }
+}
+
 static void test_end_int_eq(int got, int expected, const char *name)
 {
     if (got == expected) {
@@ -239,7 +265,7 @@ static void test_two_frags_reassemble(void)
                                    40, 20, 0, data);
     int r2 = ip_reasm_insert(buf, len2, &out_buf, &out_len);
     test_end_int_eq(r2, 1, "frag2 completes reassembly");
-    test_end_nonzero(out_buf, "reassembled buffer returned");
+    test_end_nonnull(out_buf, "reassembled buffer returned");
     test_end_int_eq(ip_reasm_stream_count(), 0, "stream cleaned up after reassembly");
 
     if (out_buf) {
@@ -302,14 +328,17 @@ static void test_many_frags(void)
     int offsets[] = {80, 0, 120, 40};
     for (int i = 0; i < 4; i++) {
         int off = offsets[i];
-        uint8_t mf = (off + 40 >= 200) ? 0 : 1;
+        uint8_t mf = (off + 40 >= 160) ? 0 : 1;  /* 4×40=160 为最后一片 */
         size_t len = build_ipv4_frag(buf, 4321, 0xC0A80001, 0xC0A80002,
                                      (uint16_t)off, 40, mf, data);
         int r = ip_reasm_insert(buf, len, &out_buf, &out_len);
+        char name[64];
         if (i < 3) {
-            test_end_int_eq(r, 0, "frag %d inserted (pending)", i+1);
+            snprintf(name, sizeof(name), "frag %d inserted (pending)", i+1);
+            test_end_int_eq(r, 0, name);
         } else {
-            test_end_int_eq(r, 1, "frag %d completes reassembly", i+1);
+            snprintf(name, sizeof(name), "frag %d completes reassembly", i+1);
+            test_end_int_eq(r, 1, name);
         }
     }
 
