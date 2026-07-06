@@ -25,7 +25,8 @@ TEST_IPREASM_SRC= $(TESTDIR)/test_ip_reasm.c $(SRCDIR)/ip_reasm.c $(SRCDIR)/tcp_
 TEST_HTTP_SRC   = $(TESTDIR)/test_http_extract.c $(SRCDIR)/http_extract.c
 
 .PHONY: all clean run test test-verbose test-reasm test-reasm-verbose \
-        test-ipreasm test-ipreasm-verbose test-http test-http-verbose
+        test-ipreasm test-ipreasm-verbose test-http test-http-verbose \
+        test-ring
 
 all: $(TARGET)
 
@@ -98,13 +99,27 @@ test-http-verbose: $(TESTDIR)/$(TEST_HTTP_TARGET)
 	./$(TESTDIR)/$(TEST_HTTP_TARGET)
 
 # ============================================================
+#  环形缓冲区测试
+# ============================================================
+
+TEST_RING_SRC   = $(TESTDIR)/test_ring_buffer.c $(SRCDIR)/ring_buffer.c
+TEST_RING_TARGET = test_ring_buffer
+
+$(TESTDIR)/$(TEST_RING_TARGET): $(TEST_RING_SRC) include/ring_buffer.h include/common.h
+	$(CC) $(CFLAGS) -o $@ $(TEST_RING_SRC) -lpthread
+
+test-ring: $(TESTDIR)/$(TEST_RING_TARGET)
+	./$(TESTDIR)/$(TEST_RING_TARGET)
+
+# ============================================================
 #  清理与运行
 # ============================================================
 
 clean:
 	rm -f $(TARGET) $(SRCDIR)/*.o
 	rm -f $(TESTDIR)/test_protocol $(TESTDIR)/$(TEST_REASM_TARGET) \
-	      $(TESTDIR)/$(TEST_IPREASM_TARGET) $(TESTDIR)/$(TEST_HTTP_TARGET)
+	      $(TESTDIR)/$(TEST_IPREASM_TARGET) $(TESTDIR)/$(TEST_HTTP_TARGET) \
+	      $(TESTDIR)/$(TEST_RING_TARGET)
 	rm -f $(TESTDIR)/*.o
 
 run: $(TARGET)
