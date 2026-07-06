@@ -39,25 +39,42 @@ static void test_end(int result, const char *name)
         tests_passed++;
 #ifdef VERBOSE
         printf("  PASS: %s\n", name);
+#else
+        (void)name;
 #endif
     } else {
         tests_failed++;
 #ifdef VERBOSE
         printf("  FAIL: %s (expected 0, got %d)\n", name, result);
+#else
+        (void)name;
 #endif
     }
 }
 
-static void test_end_nonzero(int result, const char *name)
+static void test_end_nonnull(const void *ptr, const char *name)
 {
-    if (result != 0) {
+    if (ptr != NULL) {
         tests_passed++;
 #ifdef VERBOSE
-        printf("  PASS: %s (=%d)\n", name, result);
+        printf("  PASS: %s (non-NULL)\n", name);
 #endif
     } else {
         tests_failed++;
-        printf("  FAIL: %s (expected non-zero, got 0)\n", name);
+        printf("  FAIL: %s (unexpected NULL)\n", name);
+    }
+}
+
+static void test_end_null(const void *ptr, const char *name)
+{
+    if (ptr == NULL) {
+        tests_passed++;
+#ifdef VERBOSE
+        printf("  PASS: %s (NULL as expected)\n", name);
+#endif
+    } else {
+        tests_failed++;
+        printf("  FAIL: %s (expected NULL)\n", name);
     }
 }
 
@@ -77,16 +94,16 @@ static void test_end_int_eq(int got, int expected, const char *name)
 static void capture_output(void)
 {
 #ifndef VERBOSE
-    freopen("/dev/null", "w", stdout);
-    freopen("/dev/null", "w", stderr);
+    if (freopen("/dev/null", "w", stdout)) {}
+    if (freopen("/dev/null", "w", stderr)) {}
 #endif
 }
 
 static void restore_output(void)
 {
 #ifndef VERBOSE
-    freopen("CON", "w", stdout);
-    freopen("CON", "w", stderr);
+    if (freopen("/dev/tty", "w", stdout)) {}
+    if (freopen("/dev/tty", "w", stderr)) {}
 #endif
 }
 
@@ -239,7 +256,7 @@ static void test_two_frags_reassemble(void)
                                    40, 20, 0, data);
     int r2 = ip_reasm_insert(buf, len2, &out_buf, &out_len);
     test_end_int_eq(r2, 1, "frag2 completes reassembly");
-    test_end_nonzero(out_buf, "reassembled buffer returned");
+    test_end_nonnull(out_buf, "reassembled buffer returned");
     test_end_int_eq(ip_reasm_stream_count(), 0, "stream cleaned up after reassembly");
 
     if (out_buf) {
@@ -302,14 +319,17 @@ static void test_many_frags(void)
     int offsets[] = {80, 0, 120, 40};
     for (int i = 0; i < 4; i++) {
         int off = offsets[i];
-        uint8_t mf = (off + 40 >= 200) ? 0 : 1;
+        uint8_t mf = (off + 40 >= 160) ? 0 : 1;  /* 4×40=160 为最后一片 */
         size_t len = build_ipv4_frag(buf, 4321, 0xC0A80001, 0xC0A80002,
                                      (uint16_t)off, 40, mf, data);
         int r = ip_reasm_insert(buf, len, &out_buf, &out_len);
+        char name[64];
         if (i < 3) {
-            test_end_int_eq(r, 0, "frag %d inserted (pending)", i+1);
+            snprintf(name, sizeof(name), "frag %d inserted (pending)", i+1);
+            test_end_int_eq(r, 0, name);
         } else {
-            test_end_int_eq(r, 1, "frag %d completes reassembly", i+1);
+            snprintf(name, sizeof(name), "frag %d completes reassembly", i+1);
+            test_end_int_eq(r, 1, name);
         }
     }
 

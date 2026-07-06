@@ -14,33 +14,34 @@ SRCS    = $(SRCDIR)/main.c \
           $(SRCDIR)/ring_buffer.c \
           $(SRCDIR)/tcp_reasm.c \
           $(SRCDIR)/ip_reasm.c \
-          $(SRCDIR)/http_extract.c
+          $(SRCDIR)/http_extract.c \
+          $(SRCDIR)/tls_parser.c
 OBJS    = $(SRCS:.c=.o)
 
 # 测试源文件
 TESTDIR = tests
-TEST_SRCS       = $(TESTDIR)/test_protocol.c $(SRCDIR)/protocol.c
+TEST_SRCS       = $(TESTDIR)/test_protocol.c $(SRCDIR)/protocol.c $(SRCDIR)/tls_parser.c
 TEST_REASM_SRC  = $(TESTDIR)/test_tcp_reasm.c $(SRCDIR)/tcp_reasm.c
 TEST_IPREASM_SRC= $(TESTDIR)/test_ip_reasm.c $(SRCDIR)/ip_reasm.c $(SRCDIR)/tcp_reasm.c
 TEST_HTTP_SRC   = $(TESTDIR)/test_http_extract.c $(SRCDIR)/http_extract.c
 
 .PHONY: all clean run test test-verbose test-reasm test-reasm-verbose \
         test-ipreasm test-ipreasm-verbose test-http test-http-verbose \
-        test-ring
+        test-ring test-tls test-tls-verbose
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(SRCDIR)/%.o: $(SRCDIR)/%.c include/common.h include/protocol.h include/tcp_reasm.h include/ip_reasm.h include/http_extract.h
+$(SRCDIR)/%.o: $(SRCDIR)/%.c include/common.h include/protocol.h include/tcp_reasm.h include/ip_reasm.h include/http_extract.h include/tls_parser.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ============================================================
 #  协议解析测试
 # ============================================================
 
-$(TESTDIR)/test_protocol: $(TEST_SRCS) include/protocol.h include/common.h
+$(TESTDIR)/test_protocol: $(TEST_SRCS) include/protocol.h include/common.h include/tls_parser.h
 	$(CC) $(CFLAGS) -o $@ $(TEST_SRCS)
 
 test: $(TESTDIR)/test_protocol
@@ -99,6 +100,23 @@ test-http-verbose: $(TESTDIR)/$(TEST_HTTP_TARGET)
 	./$(TESTDIR)/$(TEST_HTTP_TARGET)
 
 # ============================================================
+#  TLS 解析测试
+# ============================================================
+
+TEST_TLS_SRC    = $(TESTDIR)/test_tls.c $(SRCDIR)/tls_parser.c $(SRCDIR)/protocol.c
+TEST_TLS_TARGET = test_tls
+
+$(TESTDIR)/$(TEST_TLS_TARGET): $(TEST_TLS_SRC) include/tls_parser.h include/protocol.h include/common.h
+	$(CC) $(CFLAGS) -o $@ $(TEST_TLS_SRC)
+
+test-tls: $(TESTDIR)/$(TEST_TLS_TARGET)
+	./$(TESTDIR)/$(TEST_TLS_TARGET)
+
+test-tls-verbose: $(TESTDIR)/$(TEST_TLS_TARGET)
+	$(CC) $(CFLAGS) -DVERBOSE -o $(TESTDIR)/$(TEST_TLS_TARGET) $(TEST_TLS_SRC)
+	./$(TESTDIR)/$(TEST_TLS_TARGET)
+
+# ============================================================
 #  环形缓冲区测试
 # ============================================================
 
@@ -119,7 +137,7 @@ clean:
 	rm -f $(TARGET) $(SRCDIR)/*.o
 	rm -f $(TESTDIR)/test_protocol $(TESTDIR)/$(TEST_REASM_TARGET) \
 	      $(TESTDIR)/$(TEST_IPREASM_TARGET) $(TESTDIR)/$(TEST_HTTP_TARGET) \
-	      $(TESTDIR)/$(TEST_RING_TARGET)
+	      $(TESTDIR)/$(TEST_RING_TARGET) $(TESTDIR)/$(TEST_TLS_TARGET)
 	rm -f $(TESTDIR)/*.o
 
 run: $(TARGET)
