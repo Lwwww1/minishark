@@ -112,7 +112,7 @@ static void build_eth_header(uint8_t *buf, uint16_t ethertype)
 static void build_ipv4_header(uint8_t *buf, uint8_t ihl_words, uint16_t total_len,
                               uint8_t proto, uint32_t src, uint32_t dst)
 {
-    memset(buf, 0, 60);  /* 最大 IHL 60 */
+    memset(buf, 0, ihl_words * 4);  /* IHL 以 4 字组为单位 */
     buf[0] = 0x40 | (ihl_words & 0x0F);  /* version=4, IHL */
     buf[2] = (total_len >> 8) & 0xFF;
     buf[3] = total_len & 0xFF;
@@ -125,7 +125,7 @@ static void build_ipv4_header(uint8_t *buf, uint8_t ihl_words, uint16_t total_le
 static void build_tcp_header(uint8_t *buf, uint8_t data_off_words,
                              uint16_t src_port, uint16_t dst_port)
 {
-    memset(buf, 0, 60);
+    memset(buf, 0, data_off_words * 4);
     buf[0] = (src_port >> 8) & 0xFF;
     buf[1] = src_port & 0xFF;
     buf[2] = (dst_port >> 8) & 0xFF;
@@ -162,7 +162,7 @@ static void build_icmp_echo(uint8_t *buf, uint8_t type, uint16_t id, uint16_t se
 static void test_eth_normal(void)
 {
     test_begin("parse_eth: normal IPv4 packet");
-    uint8_t buf[64];
+    uint8_t buf[80];
     build_eth_header(buf, ETH_TYPE_IPV4);
     /* 紧跟有效 IPv4 头 */
     build_ipv4_header(buf + 14, 5, 40, IP_PROTO_TCP, 0xC0A80001, 0xC0A80002);
@@ -248,7 +248,7 @@ static void test_eth_vlan(void)
 static void test_ipv4_normal(void)
 {
     test_begin("parse_ipv4: normal TCP packet");
-    uint8_t buf[60];
+    uint8_t buf[80];
     build_ipv4_header(buf, 5, 40, IP_PROTO_TCP, 0xC0A80001, 0xC0A80002);
     /* TCP header (20 bytes) */
     build_tcp_header(buf + 20, 5, 1234, 80);
@@ -468,7 +468,7 @@ static void test_ipv6_bad_version(void)
 static void test_tcp_normal(void)
 {
     test_begin("parse_tcp: normal header");
-    uint8_t buf[20];
+    uint8_t buf[60];
     build_tcp_header(buf, 5, 1234, 80);
     capture_output();
     int r = parse_tcp(buf, 20);
