@@ -93,8 +93,8 @@ static void capture_output(void)
 static void restore_output(void)
 {
 #ifndef VERBOSE
-    freopen("CON", "w", stdout);
-    freopen("CON", "w", stderr);
+    freopen("/dev/tty", "w", stdout);
+    freopen("/dev/tty", "w", stderr);
 #endif
 }
 
