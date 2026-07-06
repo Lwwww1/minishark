@@ -3,8 +3,8 @@
 基于 **libpcap** 的轻量级网络包嗅探与协议分析工具。从链路层到应用层逐层解析，支持实时抓包、BPF 过滤、PCAP 文件读写、DNS/HTTP 解析和实时流量统计。
 
 > **项目信息**: 题目 #07 | 双人协作 | 周期 2 周（10 个工作日）  
-> **当前阶段**: 基础功能已完成（抓包、过滤、解析、统计、文件读写）  
-> **开发文档**: [项目开发计划书](doc/项目开发计划书.md)
+> **当前阶段**: Week 2 — 多线程架构、TCP 重组、IP 分片重组、HTTP 提取、性能优化已完成  
+> **开发文档**: 项目开发计划书.md
 
 ---
 
@@ -35,15 +35,32 @@
 ## 架构总览
 
 ```
-main.c              — 入口，CLI 参数解析，抓包循环
-├── capture.c/h     — libpcap 抓包引擎（混杂模式，回调分发）
+main.c              — 入口，CLI 参数解析，双线程调度
+├── capture.c/h     — libpcap 抓包引擎（混杂模式，256MB 内核缓冲）
 ├── filter.c/h      — BPF 过滤器编译与应用
 ├── pcap_io.c/h     — PCAP 文件读写（-w 实时保存，-r 离线回放）
+├── ring_buffer.c/h — 线程安全环形缓冲区（pthread 互斥锁 + 条件变量）
 ├── protocol.c/h    — 协议解析：ETH → IPv4/IPv6 → TCP/UDP/ICMP → DNS/HTTP
-└── stats.c/h       — 实时流量统计（每秒刷新）
+├── tcp_reasm.c/h   — TCP 流重组（五元组哈希表 + SEQ 排序 + 状态机）
+├── ip_reasm.c/h    — IP 分片重组（IPv4/IPv6，超时回收）
+├── http_extract.c/h— HTTP 完整报文提取（请求/响应行 + Header 解析）
+└── stats.c/h       — 实时流量统计（7 类协议，每秒刷新，含速率）
 ```
 
-**解析调用链**:
+**多线程架构**:
+
+```
+capture 线程                parse 线程
+    │                          │
+pcap_loop()                    │
+    │                          │
+pcap_callback()                │
+    ├─ pcap_dump (if -w)       │
+    └─ rb_push() ──→ [ring_buffer] ──→ rb_pop_timeout()
+                                          │
+                                    dispatch_packet()
+                                          │
+                                    parse_eth() → parse_ipv4/v6 → ...
 
 ```
 dispatch_packet()
@@ -113,9 +130,10 @@ make clean
 
 ```bash
 gcc -Wall -Wextra -O2 -g -Iinclude \
-    src/main.c src/capture.c src/filter.c \
-    src/protocol.c src/stats.c src/pcap_io.c \
-    -lpcap -lncurses -o my_sniffer
+    src/main.c src/capture.c src/filter.c src/protocol.c \
+    src/stats.c src/pcap_io.c src/ring_buffer.c \
+    src/tcp_reasm.c src/ip_reasm.c src/http_extract.c \
+    -lpcap -lpthread -o my_sniffer
 ```
 
 ---
@@ -480,8 +498,31 @@ sudo ./my_sniffer
 ### `stats.c` — 流量统计
 
 - 按 7 个协议分类统计包数和字节数
-- 使用 `struct proto_stats` 原子累计
-- 每秒自动打印统计面板
+- 每秒自动打印统计面板，含实时速率（pkt/s, B/s）
+
+### `ring_buffer.c` — 环形缓冲区
+
+- 线程安全的固定大小环形队列
+- pthread 互斥锁 + 条件变量实现阻塞和超时 pop
+- 预分配 4096 个槽位，热路径零 malloc
+
+### `tcp_reasm.c` — TCP 流重组
+
+- 五元组（src/dst IP + port + proto）哈希表索引 TCP 流
+- 按 SEQ 排序插入 TCP 段，处理重叠和重传
+- TCP 状态机：SYN → ESTABLISHED → FIN
+- 超时自动回收空闲流
+
+### `ip_reasm.c` — IP 分片重组
+
+- 支持 IPv4 和 IPv6 分片重组
+- 分片键（src/dst IP + 标识）哈希表
+- 超时回收未完成的分片流
+
+### `http_extract.c` — HTTP 报文提取
+
+- 从 TCP 流中提取完整 HTTP 请求/响应首行
+- 解析 HTTP Header 键值对
 
 ---
 
@@ -508,33 +549,34 @@ minishark/
 │   ├── capture.h           # 抓包引擎接口
 │   ├── common.h            # 公共宏、类型、日志
 │   ├── filter.h            # BPF 过滤器接口
+│   ├── http_extract.h      # HTTP 报文提取接口
+│   ├── ip_reasm.h          # IP 分片重组接口
 │   ├── pcap_io.h           # PCAP 文件读写接口
 │   ├── protocol.h          # 协议结构体定义 + 解析函数声明
-│   └── stats.h             # 流量统计接口
+│   ├── ring_buffer.h       # 环形缓冲区接口
+│   ├── stats.h             # 流量统计接口
+│   └── tcp_reasm.h         # TCP 流重组接口
 ├── src/                    # 源文件
-│   ├── main.c              # 入口、CLI 参数解析
-│   ├── capture.c           # libpcap 抓包引擎
+│   ├── main.c              # 入口、信号处理、双线程调度
+│   ├── capture.c           # libpcap 抓包引擎 + 性能统计
 │   ├── filter.c            # BPF 编译/应用
+│   ├── http_extract.c      # HTTP 完整报文提取
+│   ├── ip_reasm.c          # IP 分片重组
 │   ├── pcap_io.c           # PCAP 文件读写
 │   ├── protocol.c          # 协议解析（ETH/IP/TCP/UDP/ICMP/DNS/HTTP）
-│   └── stats.c             # 实时流量统计
+│   ├── ring_buffer.c       # 线程安全环形缓冲区
+│   ├── stats.c             # 实时流量统计
+│   └── tcp_reasm.c         # TCP 流重组（五元组 + SEQ 排序 + 状态机）
 ├── tests/                  # 测试
-│   ├── test_protocol.c     # 协议解析单元测试（53 用例）
+│   ├── test_protocol.c     # 协议解析单元测试
+│   ├── test_tcp_reasm.c    # TCP 重组测试
+│   ├── test_ip_reasm.c     # IP 分片重组测试
+│   ├── test_http_extract.c # HTTP 提取测试
+│   ├── data/               # 测试用 pcap 数据文件
 │   └── README.md           # 测试说明
-├── doc/
-│   └── 项目开发计划书.md    # 开发计划与团队分工
-├── Makefile                # 构建脚本
+├── Makefile                # 构建脚本（含 test 目标）
 └── README.md               # 本文件
 ```
-
-**待开发模块**（第二周选做）：
-
-| 模块 | 文件 | 功能 |
-|------|------|------|
-| 环形缓冲区 | `ring_buffer.c/h` | 无锁队列，抓包线程→解析线程传递 |
-| TCP 流重组 | `tcp_reasm.c/h` | 五元组哈希、SEQ 排序、HTTP 完整提取 |
-| TLS SNI | `tls_parser.c/h` | 解析 ClientHello 提取 SNI 域名 |
-| ncurses UI | `ui.c/h` | 终端界面、协议树、按键交互 |
 
 ---
 
@@ -547,11 +589,11 @@ minishark/
 | Day 3 | TCP/UDP/ICMP 解析、BPF 过滤 | ✅ 完成 |
 | Day 4 | DNS/HTTP 解析、流量统计 | ✅ 完成 |
 | Day 5 | PCAP 文件读写、解析完善与边界修复 | ✅ 完成 |
-| Day 6 | 环形缓冲区、TCP 流重组基础 | 📋 待开发 |
-| Day 7 | TCP 重组完善、HTTP 完整提取 | 📋 待开发 |
-| Day 8 | TLS SNI、ncurses UI 基础 | 📋 待开发 |
-| Day 9 | ncurses UI 完善、集成联调 | 📋 待开发 |
-| Day 10 | 测试、文档、收尾 | 📋 待开发 |
+| Day 6 | 环形缓冲区、TCP 流重组基础 | ✅ 完成 |
+| Day 7 | 多线程架构、TCP 重组完善 | ✅ 完成 |
+| Day 8 | 性能优化：内核缓冲、丢包监控、速率统计 | ✅ 完成 |
+| Day 9 | 测试完善、文档收尾 | 📋 进行中 |
+| Day 10 | 最终验收、材料整理 | 📋 待进行 |
 
 ---
 
@@ -562,6 +604,6 @@ minishark/
 3. **离线回放无需 root**：`-r` 模式仅读文件，普通用户即可运行
 4. **BPF 语法**：过滤表达式与 `tcpdump` 完全兼容
 5. **分片 IP 包**：IPv4/IPv6 仅解析首分片，非首分片自动跳过
-6. **HTTP 分片**：跨 TCP 段的 HTTP 需等 TCP 重组阶段（Day 6+）才能完整解析
+6. **HTTP 分片**：跨 TCP 段的 HTTP 通过 `tcp_reasm` 流重组后可完整提取
 7. **Ctrl+C 停止**：抓包循环中按 Ctrl+C 安全终止并自动清理资源
 8. **日志输出**：`[ERROR]` 红色输出到 stderr，解析结果到 stdout，可独立重定向
