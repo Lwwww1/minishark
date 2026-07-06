@@ -69,16 +69,16 @@ static void test_end_neg(int result, const char *name)
 static void capture_output(void)
 {
 #ifndef VERBOSE
-    freopen("/dev/null", "w", stdout);
-    freopen("/dev/null", "w", stderr);
+    if (freopen("/dev/null", "w", stdout)) {}
+    if (freopen("/dev/null", "w", stderr)) {}
 #endif
 }
 
 static void restore_output(void)
 {
 #ifndef VERBOSE
-    freopen("/dev/tty", "w", stdout);
-    freopen("/dev/tty", "w", stderr);
+    if (freopen("/dev/tty", "w", stdout)) {}
+    if (freopen("/dev/tty", "w", stderr)) {}
 #endif
 }
 

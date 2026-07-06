@@ -108,16 +108,16 @@ static void test_end_int_eq(int got, int expected, const char *name)
 static void capture_output(void)
 {
 #ifndef VERBOSE
-    freopen("/dev/null", "w", stdout);
-    freopen("/dev/null", "w", stderr);
+    if (freopen("/dev/null", "w", stdout)) {}
+    if (freopen("/dev/null", "w", stderr)) {}
 #endif
 }
 
 static void restore_output(void)
 {
 #ifndef VERBOSE
-    freopen("CON", "w", stdout);
-    freopen("CON", "w", stderr);
+    if (freopen("/dev/tty", "w", stdout)) {}
+    if (freopen("/dev/tty", "w", stderr)) {}
 #endif
 }
 
@@ -359,7 +359,8 @@ static void build_ipv6_tcp_pkt(uint8_t *pkt, size_t *pktlen,
 }
 
 /* 构建数据包获取 TCP 载荷指针（用于验证排序和内容） */
-static const uint8_t *get_payload_ptr(const uint8_t *pkt, size_t len)
+static __attribute__((unused))
+const uint8_t *get_payload_ptr(const uint8_t *pkt, size_t len)
 {
     if (len < ETH_HDR_LEN + 20 + 20) return NULL;
     /* 跳过 eth + IPv4 (20) + TCP (20) */

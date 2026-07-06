@@ -39,25 +39,16 @@ static void test_end(int result, const char *name)
         tests_passed++;
 #ifdef VERBOSE
         printf("  PASS: %s\n", name);
+#else
+        (void)name;
 #endif
     } else {
         tests_failed++;
 #ifdef VERBOSE
         printf("  FAIL: %s (expected 0, got %d)\n", name, result);
+#else
+        (void)name;
 #endif
-    }
-}
-
-static void test_end_nonzero(int result, const char *name)
-{
-    if (result != 0) {
-        tests_passed++;
-#ifdef VERBOSE
-        printf("  PASS: %s (=%d)\n", name, result);
-#endif
-    } else {
-        tests_failed++;
-        printf("  FAIL: %s (expected non-zero, got 0)\n", name);
     }
 }
 
@@ -103,16 +94,16 @@ static void test_end_int_eq(int got, int expected, const char *name)
 static void capture_output(void)
 {
 #ifndef VERBOSE
-    freopen("/dev/null", "w", stdout);
-    freopen("/dev/null", "w", stderr);
+    if (freopen("/dev/null", "w", stdout)) {}
+    if (freopen("/dev/null", "w", stderr)) {}
 #endif
 }
 
 static void restore_output(void)
 {
 #ifndef VERBOSE
-    freopen("CON", "w", stdout);
-    freopen("CON", "w", stderr);
+    if (freopen("/dev/tty", "w", stdout)) {}
+    if (freopen("/dev/tty", "w", stderr)) {}
 #endif
 }
 

@@ -70,7 +70,8 @@ static void test_end_neg(int result, const char *name)
     }
 }
 
-static void test_end_any(int result, const char *name)
+static __attribute__((unused))
+void test_end_any(int result, const char *name)
 {
     /* 允许任何返回值（测试崩溃/段错误） */
     (void)result;
@@ -78,6 +79,8 @@ static void test_end_any(int result, const char *name)
     tests_passed++;
 #ifdef VERBOSE
     printf("  PASS(no crash): %s\n", name);
+#else
+    (void)name;
 #endif
 }
 
@@ -85,16 +88,16 @@ static void capture_output(void)
 {
 #ifndef VERBOSE
     /* 重定向 stdout/stderr 到 null */
-    freopen("/dev/null", "w", stdout);
-    freopen("/dev/null", "w", stderr);
+    if (freopen("/dev/null", "w", stdout)) {}
+    if (freopen("/dev/null", "w", stderr)) {}
 #endif
 }
 
 static void restore_output(void)
 {
 #ifndef VERBOSE
-    freopen("/dev/tty", "w", stdout);
-    freopen("/dev/tty", "w", stderr);
+    if (freopen("/dev/tty", "w", stdout)) {}
+    if (freopen("/dev/tty", "w", stderr)) {}
 #endif
 }
 
