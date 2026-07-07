@@ -945,7 +945,7 @@ static void test_state_machine_null(void)
 {
     test_begin("tcp_state_machine: NULL stream (no crash)");
     capture_output();
-    tcp_state_machine(NULL, TCP_FLAG_SYN, 1000, 0, 1);
+    tcp_state_machine(NULL, TCP_FLAG_SYN, 1000, 0, 1, 1);
     test_end(0, "NULL state machine call");
     restore_output();
 }
@@ -1091,20 +1091,18 @@ static void test_overlap_retransmit_longer(void)
     tcp_reasm_extract_key(pkt, pktlen, &key);
     struct tcp_stream *s = tcp_reasm_get_stream(&key);
     if (s) {
-        /* The original segment was removed, and a new segment with the tail appended */
-        /* After retransmit handling, we expect 1 segment covering bytes 1100-1109 */
-        int found = 0;
+        /* Original segment kept at seq=1100, tail inserted at seq=1105 */
+        int found_orig = 0, found_tail = 0;
         struct tcp_segment *seg = s->segments;
         while (seg) {
-            if (seg->seq == 1100) { /* was retransmitted as 1105 with 5 bytes */
-                found = 1;
-                break;
-            }
+            if (seg->seq == 1100 && seg->data_len == 5)
+                found_orig = 1;
+            if (seg->seq == 1105 && seg->data_len == 5)
+                found_tail = 1;
             seg = seg->next;
         }
-        /* The retransmit longer case: original (1100, len=5) removed.
-         * Tail segment inserted at seq=1105 with "World" (len=5) */
-        test_end_int_eq(found, 1, "tail segment present at seq=1100");
+        test_end_int_eq(found_orig, 1, "original segment kept at seq=1100");
+        test_end_int_eq(found_tail, 1, "tail segment at seq=1105 (World)");
     }
 
     tcp_reasm_destroy();
@@ -1132,20 +1130,19 @@ static void test_overlap_partial_front(void)
     tcp_reasm_insert(pkt, pktlen);
 
     /* Insert DATA(1048, "HelloWorld") — 10 bytes (covers 1048-1057)
-     * Overlaps with existing: bytes 1050-1054 are overlap.
-     * After trimming: new should cover 1048-1049 (2 bytes) */
+     * Completely covers existing DATA(1050, "World", 5):
+     * existing [1050,1055) is removed, new [1048,1058) is kept */
     build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002, 12345, 80, 1048, 5001,
                     (const uint8_t *)"HelloWorld", 10);
     int r = tcp_reasm_insert(pkt, pktlen);
-    test_end_int_eq(r, TCP_INSERT_OVERLAP, "partial front overlap returns OVERLAP");
+    test_end_int_eq(r, TCP_INSERT_OVERLAP, "complete coverage returns OVERLAP");
 
     struct tcp_key key;
     tcp_reasm_extract_key(pkt, pktlen, &key);
     struct tcp_stream *s = tcp_reasm_get_stream(&key);
     if (s) {
-        /* Should have 3 segments: SYN, SYN+ACK, and two data segments
-         * Segments sorted: SYN(1000), SYN+ACK(5000), DATA(1048,2), DATA(1050,5) */
-        test_end_int_eq(s->seg_count, 4, "4 segments total");
+        /* 3 segments: SYN(1000), DATA(1048,10), SYN+ACK(5000) */
+        test_end_int_eq(s->seg_count, 3, "3 segments total");
     }
 
     tcp_reasm_destroy();

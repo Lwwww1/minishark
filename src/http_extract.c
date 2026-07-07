@@ -233,7 +233,14 @@ static void determine_body_length(struct http_parser *parser,
     for (int i = 0; i < msg->header_count; i++) {
         if (strcasecmp_s(msg->headers[i].name, "Content-Length") == 0) {
             parser->has_content_length = 1;
-            parser->content_length = (size_t)atoll(msg->headers[i].value);
+            /* 使用 strtoll 校验负数/非法值 */
+            char *end = NULL;
+            long long cl_val = strtoll(msg->headers[i].value, &end, 10);
+            if (end == msg->headers[i].value || cl_val < 0 || cl_val > 1024LL * 1024 * 1024) {
+                parser->content_length = 0;
+            } else {
+                parser->content_length = (size_t)cl_val;
+            }
         }
     }
 
