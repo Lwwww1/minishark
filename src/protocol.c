@@ -333,8 +333,8 @@ int parse_ipv6(const uint8_t *pkt, size_t len)
 
     const struct ipv6_hdr *h = (const struct ipv6_hdr *)pkt;
 
-    if (IPV6_VERSION(h) != 6) {
-        LOG_ERROR("parse_ipv6: bad version %u", IPV6_VERSION(h));
+    if (IPV6_GET_VERSION(h) != 6) {
+        LOG_ERROR("parse_ipv6: bad version %u", IPV6_GET_VERSION(h));
         return -1;
     }
 

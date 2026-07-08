@@ -2,6 +2,18 @@
 *.o
 my_sniffer
 
+# 测试二进制
+tests/test_protocol
+tests/test_tcp_reasm
+tests/test_ip_reasm
+tests/test_http_extract
+tests/test_ring_buffer
+tests/test_tls
+
+# macOS 调试符号
+*.dSYM
+*.dSYM/
+
 # 项目文档
 *.md
 !README.md

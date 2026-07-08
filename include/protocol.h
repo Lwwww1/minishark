@@ -89,7 +89,7 @@ struct ipv6_hdr {
     uint8_t  dst[IPV6_ADDR_LEN]; /* 目的 IPv6 地址 */
 } __attribute__((packed));
 
-#define IPV6_VERSION(hdr) (((ntohl((hdr)->ver_tc_fl)) >> 28) & 0x0F)
+#define IPV6_GET_VERSION(hdr) (((ntohl((hdr)->ver_tc_fl)) >> 28) & 0x0F)
 
 /* IPv6 扩展头类型 (next_hdr 值) — RFC 8200 §4 */
 #define IPV6_NEXT_HOPOPT   0    /* Hop-by-Hop Options */

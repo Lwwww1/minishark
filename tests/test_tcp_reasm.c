@@ -677,7 +677,8 @@ static void test_segment_sorted_insert(void)
     tcp_reasm_insert(pkt, pktlen);
 
     if (s) {
-        test_end_int_eq(s->seg_count, 3, "segment count = 3");
+        /* SYN + 3个数据段 + SYN+ACK = 5个段 */
+        test_end_int_eq(s->seg_count, 5, "segment count = 5 (SYN+3data+SYNACK)");
 
         /* 遍历链表验证顺序 */
         struct tcp_segment *seg = s->segments;
@@ -699,9 +700,9 @@ static void test_segment_sorted_insert(void)
         }
         test_end_int_eq(ok, 1, "segments in ascending SEQ order");
 
-        /* 验证 SEQ 值 */
-        if (s->segments) {
-            test_end_int_eq((int)s->segments->seq, 1001, "first segment SEQ=1001");
+        /* 验证第一个数据段的 SEQ 值（跳过 SYN 段） */
+        if (s->segments && s->segments->next) {
+            test_end_int_eq((int)s->segments->next->seq, 1001, "first data segment SEQ=1001");
         }
     }
 
@@ -739,16 +740,19 @@ static void test_segment_dup_rejection(void)
                     (const uint8_t *)"First", 5);
     tcp_reasm_insert(pkt, pktlen);
 
-    /* 再次插入相同 SEQ=1100（应被拒绝） */
+    /* 再次插入完全相同 SEQ=1100、相同数据（应被拒绝） */
     build_data_pkt(pkt, &pktlen, 0xC0A80001, 0xC0A80002,
                     12345, 80, 1100, 5001,
-                    (const uint8_t *)"Duplicate", 9);
-    tcp_reasm_insert(pkt, pktlen);
+                    (const uint8_t *)"First", 5);
+    int r = tcp_reasm_insert(pkt, pktlen);
+    test_end_int_eq(r, TCP_INSERT_DUP, "dup returns TCP_INSERT_DUP");
 
     if (s) {
-        test_end_int_eq(s->seg_count, 1, "segment count = 1 (dup rejected)");
-        if (s->segments) {
-            test_end_int_eq(s->segments->data_len, 5, "original data preserved (len=5)");
+        /* 插入后应为 3 个段：SYN + SYN+ACK + DATA(1100,5) */
+        test_end_int_eq(s->seg_count, 3, "segment count = 3 (SYN+SYNACK+DATA)");
+        /* 第一个数据段应保留原始长度（跳过 SYN 段） */
+        if (s->segments && s->segments->next) {
+            test_end_int_eq(s->segments->next->data_len, 5, "original data preserved (len=5)");
         }
     }
 
@@ -1053,8 +1057,8 @@ static void test_overlap_retransmit_shorter(void)
     struct tcp_key key;
     tcp_reasm_extract_key(pkt, pktlen, &key);
     struct tcp_stream *s = tcp_reasm_get_stream(&key);
-    if (s && s->segments) {
-        test_end_int_eq((int)s->segments->data_len, 10, "original 10 bytes preserved");
+    if (s && s->segments && s->segments->next) {
+        test_end_int_eq((int)s->segments->next->data_len, 10, "original 10 bytes preserved");
     }
 
     tcp_reasm_destroy();
@@ -1183,10 +1187,8 @@ static void test_overlap_cover_existing(void)
     if (s) {
         /* Should have: SYN, SYN+ACK, DATA(1055,10) = 3 segments */
         test_end_int_eq(s->seg_count, 3, "3 segments after covering");
-        if (s->segments) {
-            struct tcp_segment *last = s->segments;
-            while (last->next) last = last->next;
-            test_end_int_eq((int)last->data_len, 10, "covering segment has 10 bytes");
+        if (s->segments && s->segments->next) {
+            test_end_int_eq((int)s->segments->next->data_len, 10, "covering segment has 10 bytes");
         }
     }
 
