@@ -371,13 +371,11 @@ static int frag_do_reassemble(struct ip_frag_stream *fs,
     }
 
     /* 复制分片数据 */
-    uint16_t data_offset = 0;
     f = fs->fragments;
     while (f != NULL) {
         if (f->data && f->data_len > 0) {
             memcpy(buf + fs->ip_hdr_len + f->offset, f->data, f->data_len);
         }
-        data_offset += f->data_len;
         f = f->next;
     }
 
@@ -496,7 +494,7 @@ static int extract_ipv6_frag(const uint8_t *pkt, size_t len,
         return -1;
 
     const struct ipv6_hdr *ip6 = (const struct ipv6_hdr *)ipv6_start;
-    if (IPV6_VERSION(ip6) != 6)
+    if (IPV6_GET_VERSION(ip6) != 6)
         return -1;
 
     uint16_t plen = ntohs(ip6->payload_len);

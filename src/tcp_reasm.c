@@ -687,7 +687,7 @@ static int parse_ipv6_pkt(const uint8_t *pkt, size_t len,
     const struct ipv6_hdr *ip6 = (const struct ipv6_hdr *)pkt;
 
     /* 验证版本 */
-    if (IPV6_VERSION(ip6) != 6)
+    if (IPV6_GET_VERSION(ip6) != 6)
         return -1;
 
     uint16_t plen = ntohs(ip6->payload_len);
@@ -884,7 +884,15 @@ struct tcp_stream *tcp_reasm_get_stream(const struct tcp_key *key)
 {
     if (key == NULL || !g_initialized)
         return NULL;
-    return stream_lookup(key);
+
+    struct tcp_stream *s = stream_lookup(key);
+    if (s != NULL)
+        return s;
+
+    /* 尝试反向查找（同一个流可能以不同方向被存储） */
+    struct tcp_key swapped;
+    key_swap(&swapped, key);
+    return stream_lookup(&swapped);
 }
 
 int tcp_reasm_insert(const uint8_t *pkt, size_t len)
