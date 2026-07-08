@@ -24,6 +24,7 @@ static pcap_t        *g_handle   = NULL;   /* 供 capture_break 访问 */
 static pcap_dumper_t *g_dumper   = NULL;   /* -w 输出文件 */
 static ring_buffer_t *g_rb       = NULL;   /* 多线程环形缓冲区 */
 static uint64_t       g_pkt_cnt  = 0;      /* 已捕获包计数 */
+volatile int          g_cap_done = 0;      /* capture 线程已退出 */
 
 /* ================================================================
  *  包分发 → B 同学的 parse_eth()
@@ -170,6 +171,7 @@ void capture_start(pcap_t *handle)
     } else if (ret < 0) {
         LOG_ERROR("pcap_loop error: %s", pcap_geterr(handle));
     }
+    g_cap_done = 1;
 }
 
 void capture_stop(pcap_t *handle)
@@ -185,6 +187,31 @@ void capture_stop(pcap_t *handle)
 void capture_set_dumper(pcap_dumper_t *dumper)
 {
     g_dumper = dumper;
+}
+
+int capture_open_dumper(const char *filename)
+{
+    if (g_handle == NULL || filename == NULL) return -1;
+    /* 先关旧的 */
+    if (g_dumper) { pcap_dump_close(g_dumper); g_dumper = NULL; }
+    g_dumper = pcap_dump_open(g_handle, filename);
+    if (g_dumper == NULL) {
+        LOG_ERROR("pcap_dump_open(%s): %s", filename, pcap_geterr(g_handle));
+        return -1;
+    }
+    LOG_INFO("UI: saving packets to %s", filename);
+    return 0;
+}
+
+void capture_close_dumper(void)
+{
+    if (g_dumper) { pcap_dump_close(g_dumper); g_dumper = NULL; }
+    LOG_INFO("UI: pcap output closed");
+}
+
+pcap_dumper_t *capture_get_dumper(void)
+{
+    return g_dumper;
 }
 
 void capture_set_ring_buffer(ring_buffer_t *rb)

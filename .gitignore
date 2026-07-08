@@ -20,3 +20,10 @@ tests/test_tls
 
 # 抓包数据文件
 *.pcap
+
+# 测试编译产物
+tests/test_protocol
+tests/test_tcp_reasm
+tests/test_ip_reasm
+tests/test_http_extract
+tests/*.o

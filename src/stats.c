@@ -29,6 +29,7 @@ static struct proto_stats g_stats[STAT_COUNT] = {
 static time_t   g_last_print = 0;
 static time_t   g_start_time = 0;
 static uint64_t g_total_pkts = 0;
+static int      g_auto_print = 1;  /* 默认开启，UI 模式关闭 */
 
 /* ================================================================
  *  内部分类：根据原始包快速判断协议
@@ -157,7 +158,7 @@ void stats_update(const uint8_t *packet, uint32_t len)
 
     /* 每秒刷新：由 dispatch_packet 驱动，有包才检查 */
     time_t now = time(NULL);
-    if (now != g_last_print) {
+    if (g_auto_print && now != g_last_print) {
         g_last_print = now;
         stats_print();
     }
@@ -206,4 +207,9 @@ void stats_reset(void)
         g_stats[i].byte_count = 0;
     }
     g_last_print = 0;
+}
+
+void stats_set_auto_print(int enable)
+{
+    g_auto_print = enable;
 }
