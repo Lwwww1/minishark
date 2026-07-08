@@ -355,28 +355,21 @@ static int segment_insert_sorted(struct tcp_stream *stream,
             }
             /* 新段比已有段长 → 追加尾部未覆盖数据 */
             uint32_t covered = curr->seq_len;
+            uint32_t data_covered = curr->data_len;
             cur_seq     += covered;
             cur_seq_len -= covered;
-            /* 调整数据指针 */
-            if (cur_data_len > (uint16_t)covered) {
-                cur_data     += (uint16_t)covered;
-                cur_data_len -= (uint16_t)covered;
+            /* 调整数据指针（用 data_len 而非 seq_len，避免 SYN/FIN 多跳数据） */
+            if (cur_data_len > data_covered) {
+                cur_data     += (size_t)data_covered;
+                cur_data_len -= (uint16_t)data_covered;
             } else {
                 cur_data_len = 0;
             }
-            /* 移除已完全覆盖的 curr */
-            struct tcp_segment *to_rm = curr;
-            curr = curr->next;
-            if (prev)
-                prev->next = curr;
-            else
-                stream->segments = curr;
-            free(to_rm);
-            g_seg_total--;
-            stream->seg_count--;
+            /* 保留已有段，继续检查下一个段 */
             stream->retrans_count++;
             result = TCP_INSERT_RETRANSMIT;
-            /* 继续检查下一个段 */
+            prev = curr;
+            curr = curr->next;
             continue;
         }
 
@@ -384,15 +377,15 @@ static int segment_insert_sorted(struct tcp_stream *stream,
             /* curr 在新段之前开始 */
             if (curr_end >= new_end) {
                 /* 新段完全被 curr 覆盖 */
-                stream->dup_count++;
-                return TCP_INSERT_DUP;
+                stream->overlap_count++;
+                return TCP_INSERT_OVERLAP;
             }
             /* 新段尾部超出 curr → 截断新段头部 */
             uint32_t covered = curr_end - cur_seq;
             cur_seq     += covered;
             cur_seq_len -= covered;
-            if (cur_data_len > (uint16_t)covered) {
-                cur_data     += (uint16_t)covered;
+            if (cur_data_len > covered) {
+                cur_data     += (size_t)covered;
                 cur_data_len -= (uint16_t)covered;
             } else {
                 cur_data_len = 0;
@@ -523,9 +516,16 @@ uint32_t tcp_reasm_assemble(struct tcp_stream *stream)
         /* 跳过 SYN 段 */
         struct tcp_segment *first = stream->segments;
         if (first->flags & TCP_FLAG_SYN) {
-            /* SYN 仅消耗 seq_len=1，无实质数据 */
             stream->reasm_next_seq = first->seq + first->seq_len;
             stream->reasm_active = 1;
+            /* SYN 可能携带数据（TCP Fast Open），先拷贝 */
+            if (first->data_len > 0) {
+                if (reasm_buf_ensure(stream, stream->reasm_len + first->data_len) == 0) {
+                    memcpy(stream->reasm_buf + stream->reasm_len,
+                           first->data, first->data_len);
+                    stream->reasm_len += first->data_len;
+                }
+            }
             /* 移除 SYN 段 */
             stream->segments = first->next;
             free(first);
@@ -812,6 +812,10 @@ void tcp_reasm_destroy(void)
     if (!g_initialized)
         return;
 
+    /* 提前记录统计值，free 过程中会递减 */
+    int freed_streams = g_stream_count;
+    int freed_segs    = g_seg_total;
+
     /* 释放所有流及段 */
     for (size_t i = 0; i < REASM_HASH_SIZE; i++) {
         struct tcp_stream *s = g_buckets[i];
@@ -824,7 +828,7 @@ void tcp_reasm_destroy(void)
     }
 
     LOG_INFO("TCP reassembly destroyed (streams freed=%d, segments freed=%d)",
-             g_stream_count, g_seg_total);
+             freed_streams, freed_segs);
     g_stream_count = 0;
     g_seg_total    = 0;
     g_initialized  = 0;
@@ -955,16 +959,17 @@ int tcp_reasm_insert(const uint8_t *pkt, size_t len)
     }
 
     /* === 5. 运行状态机 === */
-    tcp_state_machine(stream, info.flags, info.seq, info.ack, is_from_client);
+    uint32_t seq_len = 0;
+    if (info.payload_len > 0 || (info.flags & (TCP_FLAG_SYN | TCP_FLAG_FIN))) {
+        seq_len = info.payload_len;
+        if (info.flags & TCP_FLAG_SYN) seq_len++;
+        if (info.flags & TCP_FLAG_FIN) seq_len++;
+    }
+    tcp_state_machine(stream, info.flags, info.seq, info.ack, is_from_client, seq_len);
 
     /* === 6. 插入载荷段（含重叠处理） === */
     int insert_result = 0;
     if (info.payload_len > 0 || (info.flags & (TCP_FLAG_SYN | TCP_FLAG_FIN))) {
-        /* 计算该段在数据流中的 SEQ 长度 */
-        uint32_t seq_len = info.payload_len;
-        if (info.flags & TCP_FLAG_SYN) seq_len++;
-        if (info.flags & TCP_FLAG_FIN) seq_len++;
-
         const uint8_t *payload_data = NULL;
         uint16_t data_len = 0;
         if (info.payload_len > 0) {
@@ -980,7 +985,8 @@ int tcp_reasm_insert(const uint8_t *pkt, size_t len)
 }
 
 void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
-                       uint32_t seq, uint32_t ack, int is_from_client)
+                       uint32_t seq, uint32_t ack, int is_from_client,
+                       uint32_t seq_len)
 {
     (void)ack;  /* 保留参数，后续状态机扩展时使用 */
 
@@ -1003,7 +1009,7 @@ void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
         /* 从客户端收到 SYN → SYN_RCVD */
         if ((flags & TCP_FLAG_SYN) && !(flags & TCP_FLAG_ACK) && is_from_client) {
             stream->client_isn = seq;
-            stream->client_next_seq = seq + 1;
+            stream->client_next_seq = seq + seq_len;
             stream->state = TCP_STATE_SYN_RCVD;
             LOG_INFO("tcp_reasm: SYN (ISN=0x%08x), CLOSED -> SYN_RCVD", seq);
         }
@@ -1013,13 +1019,13 @@ void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
         if (flags & TCP_FLAG_SYN && flags & TCP_FLAG_ACK && !is_from_client) {
             /* 服务端 SYN+ACK */
             stream->server_isn = seq;
-            stream->server_next_seq = seq + 1;
+            stream->server_next_seq = seq + seq_len;
             stream->state = TCP_STATE_ESTABLISHED;
             LOG_INFO("tcp_reasm: SYN+ACK (ISN=0x%08x), SYN_RCVD -> ESTABLISHED", seq);
         } else if (flags & TCP_FLAG_SYN && is_from_client) {
             /* 重传的 SYN */
             stream->client_isn = seq;
-            stream->client_next_seq = seq + 1;
+            stream->client_next_seq = seq + seq_len;
             LOG_INFO("tcp_reasm: retransmit SYN (ISN=0x%08x)", seq);
         }
         break;
@@ -1031,10 +1037,10 @@ void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
             LOG_INFO("tcp_reasm: FIN, ESTABLISHED -> FIN_RCVD");
         }
         /* 更新期望的 SEQ */
-        if (is_from_client && seq >= stream->client_next_seq) {
-            stream->client_next_seq = seq + 1;
-        } else if (!is_from_client && seq >= stream->server_next_seq) {
-            stream->server_next_seq = seq + 1;
+        if (is_from_client && seq >= stream->client_next_seq && seq_len > 0) {
+            stream->client_next_seq = seq + seq_len;
+        } else if (!is_from_client && seq >= stream->server_next_seq && seq_len > 0) {
+            stream->server_next_seq = seq + seq_len;
         }
         break;
 

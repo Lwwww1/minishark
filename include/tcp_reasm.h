@@ -182,7 +182,8 @@ struct tcp_stream *tcp_reasm_get_stream(const struct tcp_key *key);
  * 根据当前状态、TCP 标志、SEQ/ACK 进行状态迁移。
  */
 void tcp_state_machine(struct tcp_stream *stream, uint8_t flags,
-                       uint32_t seq, uint32_t ack, int is_from_client);
+                       uint32_t seq, uint32_t ack, int is_from_client,
+                       uint32_t seq_len);
 
 /*
  * tcp_reasm_extract_key — 从以太网帧提取五元组
