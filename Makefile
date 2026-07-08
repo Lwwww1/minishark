@@ -15,7 +15,8 @@ SRCS    = $(SRCDIR)/main.c \
           $(SRCDIR)/tcp_reasm.c \
           $(SRCDIR)/ip_reasm.c \
           $(SRCDIR)/http_extract.c \
-          $(SRCDIR)/tls_parser.c
+          $(SRCDIR)/tls_parser.c \
+          $(SRCDIR)/ui.c
 OBJS    = $(SRCS:.c=.o)
 
 # 测试源文件
