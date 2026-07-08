@@ -43,4 +43,7 @@ void stats_print(void);
 /* 归零所有计数器 */
 void stats_reset(void);
 
+/* 开关自动打印（UI 模式下关闭，防止 printf 与 ncurses 冲突） */
+void stats_set_auto_print(int enable);
+
 #endif /* STATS_H */

@@ -133,7 +133,7 @@ int main(int argc, char *argv[])
     }
 
     /* 主线程进入 ncurses UI（阻塞，直到用户按 q 退出） */
-    ui_run(rb);
+    ui_run(rb, filter_expr, write_file);
 
     /* UI 退出 → 停止抓包 */
     g_running = 0;

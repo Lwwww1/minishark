@@ -43,4 +43,9 @@ uint64_t capture_get_count(void);
 /* 打印内核丢包统计（pcap_stats） */
 void capture_print_stats(pcap_t *handle);
 
+/* 运行时打开/关闭 pcap 输出文件（供 UI 交互式保存） */
+int             capture_open_dumper(const char *filename);
+void            capture_close_dumper(void);
+pcap_dumper_t  *capture_get_dumper(void);
+
 #endif /* CAPTURE_H */
