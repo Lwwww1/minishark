@@ -1,12 +1,12 @@
 /*
  * main.c — 程序入口
  *
- * Day 7: 双线程架构
- *   capture 线程 → rb_push() → [ring_buffer] → rb_pop() → parse 线程
+ * 双线程架构：
+ *   capture 线程 → rb_push() → [ring_buffer] → ui_run() (ncurses UI)
  *
  * 用法：
- *   实时抓包:   sudo ./my_sniffer [-i eth0] [-f "tcp"] [-w out.pcap]
- *   离线回放:   sudo ./my_sniffer -r in.pcap [-f "tcp"]
+ *   实时抓包:  sudo ./my_sniffer [-i eth0] [-f "tcp"] [-w out.pcap]
+ *   离线回放:  sudo ./my_sniffer -r in.pcap [-f "tcp"]
  */
 
 #include "common.h"
@@ -14,6 +14,7 @@
 #include "filter.h"
 #include "pcap_io.h"
 #include "ring_buffer.h"
+#include "ui.h"
 
 volatile int g_running = 1;
 
@@ -33,31 +34,6 @@ static void print_usage(const char *prog)
     printf("  -r <file>    Read packets from pcap file\n");
     printf("  -w <file>    Write packets to pcap file\n");
     printf("  -h           Show this help\n");
-}
-
-/* ================================================================
- *  parse 线程：从 ring buffer 取包 → 调用 dispatch_packet 解析
- * ================================================================ */
-
-static void *parse_thread_fn(void *arg)
-{
-    ring_buffer_t *rb = (ring_buffer_t *)arg;
-    struct pcap_pkthdr header;
-    uint8_t           buf[MAX_PKT_SIZE];
-    uint32_t          len;
-
-    LOG_INFO("parse thread started");
-
-    while (g_running || rb_count(rb) > 0) {
-        int got = rb_pop_timeout(rb, &header, buf, &len, 100);
-        if (got > 0) {
-            dispatch_packet(&header, buf);
-        }
-        /* timeout → 检查 g_running，若为 0 且 buffer 空则退出 */
-    }
-
-    LOG_INFO("parse thread stopped");
-    return NULL;
 }
 
 /* ================================================================
@@ -144,11 +120,10 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* ---- 多线程模式：capture 线程 → rb → parse 线程 ---- */
+    /* ---- capture 线程 → ring buffer → ui_run (主线程 ncurses) ---- */
     capture_set_ring_buffer(rb);
 
-    pthread_t capture_thread, parse_thread;
-
+    pthread_t capture_thread;
     if (pthread_create(&capture_thread, NULL, capture_thread_fn, handle) != 0) {
         LOG_ERROR("pthread_create (capture) failed");
         capture_stop(handle);
@@ -157,19 +132,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (pthread_create(&parse_thread, NULL, parse_thread_fn, rb) != 0) {
-        LOG_ERROR("pthread_create (parse) failed");
-        capture_break();
-        pthread_join(capture_thread, NULL);
-        capture_stop(handle);
-        if (dumper) pcap_write_close(dumper);
-        rb_destroy(rb);
-        return 1;
-    }
+    /* 主线程进入 ncurses UI（阻塞，直到用户按 q 退出） */
+    ui_run(rb);
 
-    /* 等待线程结束 */
+    /* UI 退出 → 停止抓包 */
+    g_running = 0;
+    capture_break();
     pthread_join(capture_thread, NULL);
-    pthread_join(parse_thread, NULL);
 
     /* 性能统计 */
     capture_print_stats(handle);
