@@ -105,7 +105,8 @@ static int parse_request_line(const uint8_t *line, size_t line_len,
     else if (strcmp(method, "PATCH") == 0)  msg->method = HTTP_METHOD_PATCH;
     else if (strcmp(method, "CONNECT") == 0)  msg->method = HTTP_METHOD_CONNECT;
     else if (strcmp(method, "TRACE") == 0)  msg->method = HTTP_METHOD_TRACE;
-    else                                    msg->method = HTTP_METHOD_UNKNOWN;
+    else
+        return -1;  /* 非 HTTP 方法，拒绝 */
 
     strncpy(msg->uri, uri, sizeof(msg->uri) - 1);
     msg->uri[sizeof(msg->uri) - 1] = '\0';
@@ -630,33 +631,40 @@ int http_parser_feed(struct http_parser *parser,
     memcpy(parser->buf + parser->buf_len, data, len);
     parser->buf_len += len;
 
-    /* 尝试解析所有完整消息 */
+    /* 尝试解析所有完整消息（含垃圾数据跳过） */
     int parsed_count = 0;
-    int ret;
 
-    while ((ret = try_parse_one(parser)) == 1) {
-        parsed_count++;
-    }
-
-    if (ret == -1) {
-        /* 解析错误：可能是非 HTTP 数据，跳过一行 */
-        const uint8_t *buf = parser->buf;
-        size_t remaining = parser->buf_len;
-        const uint8_t *crlf = memfind(buf, remaining, (const uint8_t *)"\r\n", 2);
-        const uint8_t *lf   = memfind(buf, remaining, (const uint8_t *)"\n", 1);
+    while (parser->buf_len > 0) {
+        int ret = try_parse_one(parser);
+        if (ret == 1) {
+            parsed_count++;
+            continue;
+        }
+        if (ret == 0) {
+            /* 数据不完整，等待更多数据 */
+            break;
+        }
+        /* ret == -1：非 HTTP 数据，跳过一行后继续尝试 */
+        const uint8_t *crlf = memfind(parser->buf, parser->buf_len,
+                                       (const uint8_t *)"\r\n", 2);
+        const uint8_t *lf   = memfind(parser->buf, parser->buf_len,
+                                       (const uint8_t *)"\n", 1);
 
         size_t skip;
         if (crlf && (!lf || crlf <= lf))
-            skip = (size_t)(crlf - buf) + 2;
+            skip = (size_t)(crlf - parser->buf) + 2;
         else if (lf)
-            skip = (size_t)(lf - buf) + 1;
-        else
-            skip = remaining;
+            skip = (size_t)(lf - parser->buf) + 1;
+        else {
+            /* 找不到行尾，丢弃全部 */
+            skip = parser->buf_len;
+        }
 
         if (skip > 0 && skip <= parser->buf_len) {
             memmove(parser->buf, parser->buf + skip, parser->buf_len - skip);
             parser->buf_len -= skip;
-            LOG_WARN("http_extract: parse error, skipped %zu bytes", skip);
+        } else {
+            break;
         }
     }
 

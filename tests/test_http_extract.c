@@ -37,12 +37,12 @@ static void test_end(int result, const char *name)
         tests_passed++;
 #ifdef VERBOSE
         printf("  PASS: %s\n", name);
+#else
+        (void)name;
 #endif
     } else {
         tests_failed++;
-#ifdef VERBOSE
         printf("  FAIL: %s (expected 0, got %d)\n", name, result);
-#endif
     }
 }
 
@@ -72,7 +72,8 @@ static void test_end_nonnull(void *ptr, const char *name)
     }
 }
 
-static void test_end_null(void *ptr, const char *name)
+static __attribute__((unused))
+void test_end_null(void *ptr, const char *name)
 {
     if (ptr == NULL) {
         tests_passed++;
