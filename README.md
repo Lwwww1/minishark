@@ -3,7 +3,7 @@
 基于 **libpcap** 的轻量级网络包嗅探与协议分析工具。从链路层到应用层逐层解析，支持实时抓包、BPF 过滤、PCAP 文件读写、DNS/HTTP 解析和实时流量统计。
 
 > **项目信息**: 题目 #07 | 双人协作 | 周期 2 周（10 个工作日）  
-> **当前阶段**: Week 2 — 多线程架构、TCP 重组、IP 分片重组、HTTP 提取、性能优化已完成  
+> **当前阶段**: 全部功能已完成 — 抓包/过滤/解析/统计/文件读写/TCP重组/TLS SNI/ncurses UI  
 > **开发文档**: 项目开发计划书.md
 
 ---
@@ -44,23 +44,31 @@ main.c              — 入口，CLI 参数解析，双线程调度
 ├── tcp_reasm.c/h   — TCP 流重组（五元组哈希表 + SEQ 排序 + 状态机）
 ├── ip_reasm.c/h    — IP 分片重组（IPv4/IPv6，超时回收）
 ├── http_extract.c/h— HTTP 完整报文提取（请求/响应行 + Header 解析）
-└── stats.c/h       — 实时流量统计（7 类协议，每秒刷新，含速率）
+├── tls_parser.c/h  — TLS 握手识别与 SNI 域名提取
+├── stats.c/h       — 实时流量统计（7 类协议，每秒刷新，含速率）
+└── ui.c/h          — ncurses 终端界面（包列表/协议树/Hex/过滤/搜索/保存）
 ```
 
-**多线程架构**:
+**多线程 + UI 架构**:
 
 ```
-capture 线程                parse 线程
-    │                          │
-pcap_loop()                    │
-    │                          │
-pcap_callback()                │
-    ├─ pcap_dump (if -w)       │
+capture 线程                    主线程 (ncurses UI)
+    │                               │
+pcap_loop()                         │
+    │                               │
+pcap_callback()                     │
+    ├─ pcap_dump (if -w)            │
     └─ rb_push() ──→ [ring_buffer] ──→ rb_pop_timeout()
-                                          │
-                                    dispatch_packet()
-                                          │
-                                    parse_eth() → parse_ipv4/v6 → ...
+                                           │
+                                     quick_parse() → 显示
+                                     stats_update()
+                                           │
+                                     ┌─────────────────────┐
+                                     │  Packet List        │
+                                     │  Protocol Tree/Hex  │
+                                     │  Traffic Stats      │
+                                     │  f:filter w:save    │
+                                     └─────────────────────┘
 
 ```
 dispatch_packet()
@@ -283,11 +291,30 @@ sudo ./my_sniffer -f "udp port 53" -w dns.pcap
 
 # 离线回放 DNS 文件 + 再过滤到特定主机
 ./my_sniffer -r dns.pcap -f "host 8.8.8.8"
-
-# 完整链路：先抓包保存，再离线分析
-sudo ./my_sniffer -i eth0 -f "tcp port 80 or tcp port 443" -w session.pcap
-./my_sniffer -r session.pcap | head -100
 ```
+
+### 6. ncurses 终端界面
+
+启动后进入全屏 TUI：
+
+```bash
+sudo ./my_sniffer                     # 实时抓包 + UI
+sudo ./my_sniffer -f "tcp port 80"    # BPF 过滤 + UI
+./my_sniffer -r capture.pcap          # 离线回放 + UI
+```
+
+| 按键 | 功能 |
+|------|------|
+| `↑` `↓` `PgUp` `PgDn` `Home` `End` | 导航包列表 |
+| `Enter` | 展开/折叠协议树 |
+| `h` | 切换 Hex dump 视图（原始字节） |
+| `s` | 切换统计面板 ON/OFF |
+| `f` | 显示过滤：输入关键字（proto/port/IP），ESC 清除 |
+| `n` | 跳到下一个匹配的包 |
+| `w` | 交互式保存 pcap：输入文件名，自动追加 .pcap，再次按 w 停止 |
+| `q` | 退出 |
+
+状态栏显示：包总数、BPF 过滤条件、保存状态、[EOF] 离线回放结束标记。
 
 ---
 
@@ -523,6 +550,20 @@ sudo ./my_sniffer
 
 - 从 TCP 流中提取完整 HTTP 请求/响应首行
 - 解析 HTTP Header 键值对
+- 支持 chunked encoding、Content-Length、pipelining
+
+### `tls_parser.c` — TLS SNI 提取
+
+- 识别 TLS ClientHello/ServerHello 握手
+- 解析 SNI 扩展提取域名（RFC 6066）
+
+### `ui.c` — ncurses 终端界面
+
+- 双线程架构：capture 线程 → ring buffer → ncurses 主线程
+- 实时包列表滚动、协议树逐层展开
+- Hex dump 视图（选中包原始字节）
+- 显示过滤（关键字匹配 proto/port/IP/MAC）
+- 交互式 pcap 保存（补存已有包 + 后续包）
 
 ---
 
@@ -584,16 +625,16 @@ minishark/
 
 | 天次 | 功能 | 状态 |
 |------|------|------|
-| Day 1 | 环境搭建、项目骨架、协议头结构体 | ✅ 完成 |
-| Day 2 | 抓包循环、Ethernet/IP 解析 | ✅ 完成 |
-| Day 3 | TCP/UDP/ICMP 解析、BPF 过滤 | ✅ 完成 |
-| Day 4 | DNS/HTTP 解析、流量统计 | ✅ 完成 |
-| Day 5 | PCAP 文件读写、解析完善与边界修复 | ✅ 完成 |
-| Day 6 | 环形缓冲区、TCP 流重组基础 | ✅ 完成 |
-| Day 7 | 多线程架构、TCP 重组完善 | ✅ 完成 |
-| Day 8 | 性能优化：内核缓冲、丢包监控、速率统计 | ✅ 完成 |
-| Day 9 | 测试完善、文档收尾 | 📋 进行中 |
-| Day 10 | 最终验收、材料整理 | 📋 待进行 |
+| Day 1 | 环境搭建、项目骨架、协议头结构体 | ✅ |
+| Day 2 | 抓包循环、Ethernet/IP 解析 | ✅ |
+| Day 3 | TCP/UDP/ICMP 解析、BPF 过滤 | ✅ |
+| Day 4 | DNS/HTTP 解析、流量统计 | ✅ |
+| Day 5 | PCAP 文件读写、解析完善与边界修复 | ✅ |
+| Day 6 | 环形缓冲区、TCP 流重组基础 | ✅ |
+| Day 7 | 多线程架构、TCP 重组完善 | ✅ |
+| Day 8 | 性能优化、TLS SNI、ncurses UI 基础 | ✅ |
+| Day 9 | ncurses UI 完善：Hex dump/显示过滤/交互保存 | ✅ |
+| Day 10 | 测试、文档、收尾 | ✅ |
 
 ---
 
